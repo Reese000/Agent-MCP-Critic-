@@ -1,0 +1,42 @@
+{
+    "taskId": "full_system_eval_v1",
+    "waves": [
+        {
+            "id": "wave_discovery",
+            "tasks": [
+                {
+                    "agentId": "researcher_01",
+                    "tool": "code_index",
+                    "args": { "root": "c:/Users/reese/OneDrive/Desktop/AI/Agent MCP (critic)" }
+                }
+            ]
+        },
+        {
+            "id": "wave_audit",
+            "tasks": [
+                {
+                    "agentId": "developer_01",
+                    "tool": "fs_read",
+                    "args": { "path": "c:/Users/reese/OneDrive/Desktop/AI/Agent MCP (critic)/src/Indexer.ts" },
+                    "dependency": "wave_discovery"
+                }
+            ]
+        },
+        {
+            "id": "wave_verify",
+            "tasks": [
+                {
+                    "agentId": "critic_01",
+                    "tool": "get_critique",
+                    "args": {
+                        "user_request": "Verify system health and Indexer language support.",
+                        "work_done": "Performing final autonomous audit of Indexer.ts. Checked security guards and RPM synchronization.",
+                        "git_diff_output": "diff --git a/src/Indexer.ts b/src/Indexer.ts\nindex abc..def\n--- a/src/Indexer.ts\n+++ b/src/Indexer.ts\n@@ -10,1 +10,1 @@\n-    private static readonly EXCLUDED_DIRS = [\"node_modules\", \".git\", \"dist\", \"build\", \".next\", \".antigravity\", \"venv\", \"__pycache__\"];\n+    private static readonly EXCLUDED_DIRS = [\"node_modules\", \".git\", \"dist\", \"build\", \".next\", \".antigravity\", \"venv\", \"__pycache__\", \"coverage\"];",
+                        "raw_test_logs": "Audit suite passed 100%."
+                    },
+                    "dependency": "wave_audit"
+                }
+            ]
+        }
+    ]
+}

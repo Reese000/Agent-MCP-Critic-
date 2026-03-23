@@ -1,0 +1,25 @@
+{
+    "compilerOptions": {
+        "target": "ES2022",
+        "module": "NodeNext",
+        "moduleResolution": "NodeNext",
+        "outDir": "dist",
+        "strict": true,
+        "lib": [
+            "ES2022"
+        ],
+        "esModuleInterop": true,
+        "skipLibCheck": true,
+        "forceConsistentCasingInFileNames": true
+    },
+    "include": [
+        "src/**/*",
+        "tests/audit_suite.ts",
+        "tests/verify_claim_1.ts",
+        "tests/verify_claim_5.ts"
+    ],
+    "exclude": [
+        "tests/integration/**/*",
+        "tests/verify_fix.ts"
+    ]
+}
