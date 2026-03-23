@@ -1,40 +1,52 @@
-# AI Agent Installation Guide: Critic-MCP
+# Agent-MCP-Critic Installation Guide
 
-This document provides a structured workflow for AI agents to install and configure the Critic-MCP server without human intervention.
+This guide provides a streamlined, hardened installation process for the Agent-MCP-Critic server.
 
-## Mandatory Step 1: Baseline Verification
-Before writing any configuration, verify the existing environment:
-- Check for `node` and `npm` in PATH.
-- Verify existing `package.json` scripts (`build`, `test`, `healthcheck`).
+## Prerequisites
+- Node.js (v18+)
+- npm
+- A valid OpenRouter or Gemini API key
 
-## Mandatory Step 2: Automated Healthcheck
-Execute the `healthcheck_all.ps1` script. This script is designed to:
-- Identify missing dependencies.
-- Confirm build artifacts exist.
-- Detect placeholder API keys in `.env`.
-- **Output a valid MCP JSON-RPC configuration block.**
+## Installation Steps
 
-## Mandatory Step 3: API Verification (Violation 2 Prevention)
-The `critic` server acts as a quality gate. It will reject submissions that do not verify API contracts.
-- Read `api_verification.md` to understand the OpenRouter contract.
-- If you are implementing new tools, create an isolated test script (e.g., `tests/verify_api.ts`) BEFORE integrating.
+1. **Clone the Repository**:
+   ```bash
+   git clone https://github.com/Reese000/Agent-MCP-Critic- .
+   npm install
+   ```
 
-## Mandatory Step 4: Compliance Validation (Violation 5 Prevention)
-Do not submit superficial test logs.
-- Run `npm run test`.
-- This executes an exhaustive compliance check (`src/test_compliance.ts`) that mocks JSON-RPC noise and verifies that stdout remains clean.
-- Ensure the output contains `=== COMPLIANCE RESULT: SUCCESS ===`.
+2. **Configure Environment**:
+   - Create a `.env` file based on `.env.example`.
+   - Alternatively, run the migration script if upgrading from a legacy installation:
+     ```bash
+     node scripts/migrate_secrets.js
+     ```
 
-## Configuration Block Generation
-The server should be integrated into `mcp_config.json` as follows (replace path with absolute path):
+3. **Build the Server**:
+   ```bash
+   npm run build
+   ```
+
+4. **Verify Compliance**:
+   Run the exhaustive compliance test to ensure the server is ready for Antigravity:
+   ```bash
+   npm run test
+   ```
+
+## Antigravity Configuration
+Update your `mcp_config.json` with the following entry. **Note**: It is highly recommended to provide the API key directly in the `env` block for maximum reliability in daemon mode.
+
 ```json
-{
-  "mcpServers": {
-    "critic": {
-      "command": "node",
-      "args": ["/path/to/Critic-MCP/dist/index.js"],
-      "env": {}
-    }
+"critic": {
+  "command": "node",
+  "args": ["C:/PATH/TO/REPO/dist/index.js"],
+  "env": {
+    "OPENROUTER_API_KEY": "YOUR_KEY_HERE"
   }
 }
 ```
+
+## Troubleshooting
+- **Build Artifacts**: Ensure the `dist/` directory contains `index.js`.
+- **Protocol Noise**: If you see JSON-RPC errors, verify that `ProtocolFilter` is active in `src/index.ts`.
+- **Config Reload**: Antigravity requires a manual reload of the MCP configuration after editing `mcp_config.json`.

@@ -10,16 +10,15 @@
         ],
         "esModuleInterop": true,
         "skipLibCheck": true,
-        "forceConsistentCasingInFileNames": true
+        "forceConsistentCasingInFileNames": true,
+        "rootDir": "src"
     },
     "include": [
-        "src/**/*",
-        "tests/audit_suite.ts",
-        "tests/verify_claim_1.ts",
-        "tests/verify_claim_5.ts"
+        "src/**/*"
     ],
     "exclude": [
-        "tests/integration/**/*",
-        "tests/verify_fix.ts"
+        "node_modules",
+        "dist",
+        "tests"
     ]
 }

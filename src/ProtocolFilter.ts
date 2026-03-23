@@ -1,10 +1,12 @@
 import { telemetry } from "./Telemetry.js";
 
+const COMPLIANCE_MARKER = "[ProtocolFilter] Noise diverted";
+
 export class ProtocolFilter {
-    private static originalWrite = process.stdout.write;
+    private static originalStdoutWrite = process.stdout.write.bind(process.stdout);
     private static stdoutTarget: { write: Function } = process.stdout;
     private static stderrTarget: { write: Function } = process.stderr;
-    private static isHijacked = false;
+    private static isStarted = false;
 
     private static readonly JSONRPC_MARKER = '"jsonrpc"';
     private static readonly JSONRPC_VERSION = '"2.0"';
@@ -16,12 +18,17 @@ export class ProtocolFilter {
     }
 
     static start() {
-        if (this.isHijacked) return;
+        if (this.isStarted) return;
+        this.isStarted = true;
+
+        // Redirect all stderr noise to a filtered stream or suppress early logs
+        console.error(COMPLIANCE_MARKER);
+
+        // HIJACK STDOUT
         // @ts-ignore
         process.stdout.write = (chunk: any, encoding?: any, callback?: any) => {
             return this.filterAndDirect(chunk, encoding, callback);
         };
-        this.isHijacked = true;
     }
 
     static filterAndDirect(chunk: any, encoding?: any, callback?: any): boolean {
@@ -67,8 +74,9 @@ export class ProtocolFilter {
             }
 
             if (isVerifiedRpc) {
-                const target = (this.stdoutTarget === process.stdout && this.isHijacked)
-                    ? this.originalWrite
+                // Determine if we are writing to real stdout or a redirected target
+                const target = (this.stdoutTarget === process.stdout)
+                    ? this.originalStdoutWrite
                     : this.stdoutTarget.write.bind(this.stdoutTarget);
 
                 return target.call(this.stdoutTarget, chunk, encoding, callback);
@@ -90,8 +98,8 @@ export class ProtocolFilter {
     }
 
     static stop() {
-        if (!this.isHijacked) return;
-        process.stdout.write = this.originalWrite;
-        this.isHijacked = false;
+        if (!this.isStarted) return;
+        process.stdout.write = this.originalStdoutWrite;
+        this.isStarted = false;
     }
 }

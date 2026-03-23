@@ -29,9 +29,31 @@ import { spawn } from "child_process";
 ProtocolFilter.start();
 
 try {
-    dotenv.config({ path: path.join(__dirname, "..", ".env") });
+    // Robust .env resolution: Try CWD first (daemon/Antigravity style), 
+    // then climb up from __dirname (dev/prod mirrored style)
+    const findEnv = (startDir: string) => {
+        let current = startDir;
+        for (let i = 0; i < 4; i++) { // Up to 4 levels
+            const p = path.join(current, ".env");
+            const result = dotenv.config({ path: p });
+            if (!result.error) {
+                console.error(`[CRITIC-INIT] Loaded .env from: ${p}`);
+                return true;
+            }
+            const parent = path.dirname(current);
+            if (parent === current) break;
+            current = parent;
+        }
+        return false;
+    };
+
+    if (!findEnv(process.cwd())) {
+        if (!findEnv(__dirname)) {
+            console.error("Warning: No .env file found via CWD or directory climbing.");
+        }
+    }
 } catch (error) {
-    console.error("Critical: Failed to load .env file:", error);
+    console.error("Critical: Unexpected error during .env discovery:", error);
 }
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -41,7 +63,9 @@ const CONFIG = {
     DEFAULT_MODEL: "google/gemini-2.5-flash-lite-preview-09-2025",
     FALLBACK_MODEL: "gemini-flash-latest",
     OPENROUTER_FALLBACK: "google/gemini-2.0-flash-001",
-    VERSION: "2.2.0"
+    VERSION: "2.2.0",
+    TIMEOUT_AGENT_TURN_MS: Number(process.env.TIMEOUT_AGENT_TURN_MS) || 60000,
+    TIMEOUT_TOTAL_TASK_MS: Number(process.env.TIMEOUT_TOTAL_TASK_MS) || 300000
 };
 
 const HAS_UNAVAILABLE_LOCAL_PROXY = /(?:^|:\/\/)(?:127\.0\.0\.1|localhost):8080(?:$|[/?])/i.test(
@@ -54,6 +78,19 @@ if (HAS_UNAVAILABLE_LOCAL_PROXY) {
     delete process.env.HTTPS_PROXY;
     delete process.env.http_proxy;
     delete process.env.https_proxy;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> {
+    let timeoutId: NodeJS.Timeout;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => {
+            reject(new Error(`[TIMEOUT] ${errorMessage} after ${timeoutMs}ms`));
+        }, timeoutMs);
+    });
+
+    return Promise.race([promise, timeoutPromise]).finally(() => {
+        if (timeoutId) clearTimeout(timeoutId);
+    });
 }
 
 function buildRequestConfig(overrides: AxiosRequestConfig = {}): AxiosRequestConfig {
@@ -429,7 +466,7 @@ async function callOpenRouterApi(messages: Message[], model: string = CONFIG.DEF
         }
 
         console.error(`[API VERIFICATION] Success: HTTP ${response.status} from OpenRouter using model ${model}`);
-        
+
         const responseText = response.data?.choices?.[0]?.message?.content;
         if (!responseText) {
             throw new Error(`Invalid response format from OpenRouter for model ${model}`);
@@ -467,21 +504,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             max_turns?: number;
         }
         const { topic, position_a, position_b, max_turns = 3 } = request.params.arguments as unknown as AgentDebateArgs;
-        
+
         // Explicitly enforce Nitro tier, discarding any downstream requested models.
         const debateModel = CONFIG.DEFAULT_MODEL;
-        
+
         let transcript = `DEBATE TOPIC: ${topic}\n\n`;
         let historyA: Message[] = [{ role: "system", content: `You are Agent A. Defend this position strictly: ${position_a}. The topic is: ${topic}. Be concise, articulate, and try to dismantle the opponent's argument. If you physically cannot defend it anymore, output <concede>.` }];
         let historyB: Message[] = [{ role: "system", content: `You are Agent B. Defend this position strictly: ${position_b}. The topic is: ${topic}. Be concise, articulate, and try to dismantle the opponent's argument. If you physically cannot defend it anymore, output <concede>.` }];
-        
+
         try {
             let lastMessage = "";
             for (let i = 0; i < max_turns; i++) {
                 // Agent A Turn
                 historyA.push({ role: "user", content: i === 0 ? "Begin your opening argument." : `Agent B argued: "${lastMessage}". Counter it.` });
                 const replyA = await callOpenRouterApi(historyA, debateModel);
-                transcript += `**Agent A (Turn ${i+1})**:\n${replyA}\n\n`;
+                transcript += `**Agent A (Turn ${i + 1})**:\n${replyA}\n\n`;
                 historyA.push({ role: "assistant", content: replyA });
                 if (replyA.includes("<concede>")) break;
                 lastMessage = replyA;
@@ -489,7 +526,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 // Agent B Turn
                 historyB.push({ role: "user", content: `Agent A argued: "${lastMessage}". Counter it.` });
                 const replyB = await callOpenRouterApi(historyB, debateModel);
-                transcript += `**Agent B (Turn ${i+1})**:\n${replyB}\n\n`;
+                transcript += `**Agent B (Turn ${i + 1})**:\n${replyB}\n\n`;
                 historyB.push({ role: "assistant", content: replyB });
                 if (replyB.includes("<concede>")) break;
                 lastMessage = replyB;
@@ -503,10 +540,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 role: "user",
                 content: transcript
             }];
-            
+
             const summary = await callOpenRouterApi(summaryPrompt, CONFIG.DEFAULT_MODEL);
             const finalDocument = `# Debate Summary: ${topic}\n\n## Transcript\n${transcript}\n## Conclusion\n${summary}`;
-            
+
             return {
                 content: [{ type: "text", text: finalDocument }]
             };
@@ -534,7 +571,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { tasks, optimization_rounds = 0, concurrency = 3 } = request.params.arguments as unknown as ParallelOrchestratorArgs;
 
         const results: Record<string, { output: string; persona: string; logs: string[] }> = {};
-        
+
         // Helper to resolve persona
         const resolvePersona = (p: string) => {
             const base = personaTemplates[p] || p;
@@ -544,33 +581,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const runTool = async (name: string, args: any) => {
             console.error(`[ORCHESTRATOR] Executing Local Tool: ${name} with args:`, args);
-            
+
             // Normalize path-like arguments
             const normalizedPath = args.path || args.file_path || args.filepath || args.target;
             const normalizedContent = args.content || args.data || args.text;
 
             switch (name) {
-                case "fs_list": 
+                case "fs_list":
                     if (!normalizedPath) throw new Error("Missing 'path' argument for fs_list.");
                     return JSON.stringify(await FilesystemHandler.list(normalizedPath));
-                case "fs_read": 
+                case "fs_read":
                     if (!normalizedPath) throw new Error("Missing 'path' argument for fs_read.");
                     return await FilesystemHandler.read(normalizedPath);
-                case "fs_write": 
+                case "fs_write":
                     if (!normalizedPath || normalizedContent === undefined) throw new Error("Missing 'path' or 'content' argument for fs_write.");
                     // Enforcement Layer Check
                     if (blackboard.get("_sys_critique_status") !== "APPROVED") {
-                         throw new Error("PROTOCOL VIOLATION: fs_write denied. No 'APPROVED' critique found in system state. You MUST call get_critique and receive approval before modifying the filesystem.");
+                        throw new Error("PROTOCOL VIOLATION: fs_write denied. No 'APPROVED' critique found in system state. You MUST call get_critique and receive approval before modifying the filesystem.");
                     }
                     return await FilesystemHandler.write(normalizedPath, normalizedContent, !!args.append);
-                case "fs_mkdir": 
+                case "fs_mkdir":
                     if (!normalizedPath) throw new Error("Missing 'path' argument for fs_mkdir.");
                     return await FilesystemHandler.mkdir(normalizedPath);
-                case "fs_delete": 
+                case "fs_delete":
                     if (!normalizedPath) throw new Error("Missing 'path' argument for fs_delete.");
                     // Enforcement Layer Check
                     if (blackboard.get("_sys_critique_status") !== "APPROVED") {
-                         throw new Error("PROTOCOL VIOLATION: fs_delete denied. No 'APPROVED' critique found in system state. You MUST call get_critique and receive approval before deleting files.");
+                        throw new Error("PROTOCOL VIOLATION: fs_delete denied. No 'APPROVED' critique found in system state. You MUST call get_critique and receive approval before deleting files.");
                     }
                     return await FilesystemHandler.delete(normalizedPath);
                 case "bb_get":
@@ -601,7 +638,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     if (!args.command || !normalizedPath) throw new Error("Missing 'command' or 'path' argument for fs_execute.");
                     // Enforcement Layer Check
                     if (blackboard.get("_sys_critique_status") !== "APPROVED") {
-                         throw new Error("PROTOCOL VIOLATION: fs_execute denied. No 'APPROVED' critique found in system state. You MUST call get_critique and receive approval before executing commands.");
+                        throw new Error("PROTOCOL VIOLATION: fs_execute denied. No 'APPROVED' critique found in system state. You MUST call get_critique and receive approval before executing commands.");
                     }
                     const execRes = await TerminalHandler.execute(args.command, normalizedPath, args.timeout);
                     return `EXIT CODE: ${execRes.exitCode}\nSTDOUT:\n${execRes.stdout}\nSTDERR:\n${execRes.stderr}`;
@@ -629,118 +666,128 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             for (let i = 0; i < wave.length; i += concurrency) {
                 const batch = wave.slice(i, i + concurrency);
                 await Promise.all(batch.map(async (task) => {
-                    const messages: Message[] = [{ role: "system", content: resolvePersona(task.persona) }];
-                    
-                    // PHASE 9: Context Injection (Provide summaries of previous waves)
-                    let previousSummaries = "";
-                    for (const key of Object.keys(blackboard.getAll())) {
-                        if (key.startsWith("wave_summary_")) {
-                            previousSummaries += `[SUMMARY: ${key.toUpperCase()}]\n${blackboard.get(key)}\n\n`;
-                        }
-                    }
-                    
-                    const taskPrompt = previousSummaries 
-                        ? `CONSOLIDATED PREVIOUS WORK:\n${previousSummaries}\n---\nCURRENT TASK: ${task.description}\nExecute the required tool calls to complete this objective.`
-                        : `Your task: ${task.description}\nExecute the required tool calls to complete this objective.`;
+                    await withTimeout(
+                        (async () => {
+                            const messages: Message[] = [{ role: "system", content: resolvePersona(task.persona) }];
 
-                    messages.push({ role: "user", content: taskPrompt });
-                    
-                    const logs: string[] = [];
-                    let turn = 0;
-                    const maxTurns = task.max_turns || 5;
-
-                    while (turn < maxTurns) {
-                        telemetry.sendAgentUpdate({
-                            id: task.id,
-                            persona: task.persona,
-                            status: "reasoning",
-                            turnCount: turn,
-                            startTime: Date.now()
-                        });
-                        
-                        // Cost-Sensitive Model Switching with Rate Limiting (Throttler)
-                        const model = task.model || ModelManager.getModelForPersona(task.persona);
-                        const resText = await apiThrottler.throttle(() => callOpenRouterApi(messages, model));
-                        
-                        // Extract thinking blocks for transparency
-                        const thoughtMatch = resText.match(/<thinking>([\s\S]*?)<\/thinking>/i);
-                        if (thoughtMatch) {
-                            const thoughts = thoughtMatch[1].trim();
-                            const thoughtKey = `thought_${task.id}_turn_${turn}`;
-                            blackboard.set(thoughtKey, thoughts);
-                            logs.push(`[THINKING] Captured to blackboard key: ${thoughtKey}`);
-                        }
-
-                        messages.push({ role: "assistant", content: resText });
-                        logs.push(`Agent Output: ${resText.substring(0, 200)}...`);
-
-                        // Robust Regex for CALL: tool_name(...) - with /s flag for multi-line
-                        const toolMatch = resText.match(/CALL: (\w+)\s*\((.*)\)/s);
-                        if (toolMatch) {
-                            const name = toolMatch[1];
-                            const argString = toolMatch[2] || "";
-                            
-                            let args: any = {};
-                            // Sophisticated parser for key="value" that handles escaped quotes
-                            const argRegex = /(\w+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|(\d+)|(true|false))/g;
-                            let m;
-                            while ((m = argRegex.exec(argString)) !== null) {
-                                const key = m[1];
-                                let val: any = m[2] !== undefined ? m[2] : (m[3] !== undefined ? m[3] : (m[4] !== undefined ? Number(m[4]) : m[5] === "true"));
-                                
-                                // Unescape quotes if it was a string
-                                if (typeof val === 'string') {
-                                    val = val.replace(/\\"/g, '"').replace(/\\'/g, "'").replace(/\\n/g, '\n');
+                            // PHASE 9: Context Injection (Provide summaries of previous waves)
+                            let previousSummaries = "";
+                            for (const key of Object.keys(blackboard.getAll())) {
+                                if (key.startsWith("wave_summary_")) {
+                                    previousSummaries += `[SUMMARY: ${key.toUpperCase()}]\n${blackboard.get(key)}\n\n`;
                                 }
-                                args[key] = val;
                             }
 
-                            try {
+                            const taskPrompt = previousSummaries
+                                ? `CONSOLIDATED PREVIOUS WORK:\n${previousSummaries}\n---\nCURRENT TASK: ${task.description}\nExecute the required tool calls to complete this objective.`
+                                : `Your task: ${task.description}\nExecute the required tool calls to complete this objective.`;
+
+                            messages.push({ role: "user", content: taskPrompt });
+
+                            const logs: string[] = [];
+                            let turn = 0;
+                            const maxTurns = task.max_turns || 5;
+
+                            while (turn < maxTurns) {
                                 telemetry.sendAgentUpdate({
                                     id: task.id,
                                     persona: task.persona,
-                                    status: "executing",
-                                    lastTool: name,
+                                    status: "reasoning",
                                     turnCount: turn,
                                     startTime: Date.now()
                                 });
-                                
-                                const toolResult = await runTool(name, args);
-                                telemetry.sendLog(`[${task.id}] Tool ${name} Success`);
-                                messages.push({ role: "user", content: `TOOL_RESULT: ${toolResult}` });
-                                logs.push(`Tool ${name} Result: ${toolResult.substring(0, 500)}...`);
-                            } catch (e: any) {
-                                telemetry.sendLog(`[${task.id}] Tool ${name} ERROR: ${e.message}`, "error");
-                                messages.push({ role: "user", content: `TOOL_ERROR: ${e.message}` });
-                                logs.push(`Tool ${name} Error: ${e.message}`);
+
+                                // Cost-Sensitive Model Switching with Rate Limiting (Throttler)
+                                const model = task.model || ModelManager.getModelForPersona(task.persona);
+                                const resText = await withTimeout(
+                                    apiThrottler.throttle(() => callOpenRouterApi(messages, model)),
+                                    CONFIG.TIMEOUT_AGENT_TURN_MS,
+                                    `Agent ${task.id} turn ${turn} (Model: ${model})`
+                                );
+
+                                // Extract thinking blocks for transparency
+                                const thoughtMatch = resText.match(/<thinking>([\s\S]*?)<\/thinking>/i);
+                                if (thoughtMatch) {
+                                    const thoughts = thoughtMatch[1].trim();
+                                    const thoughtKey = `thought_${task.id}_turn_${turn}`;
+                                    blackboard.set(thoughtKey, thoughts);
+                                    logs.push(`[THINKING] Captured to blackboard key: ${thoughtKey}`);
+                                }
+
+                                messages.push({ role: "assistant", content: resText });
+                                logs.push(`Agent Output: ${resText.substring(0, 200)}...`);
+
+                                // Robust Regex for CALL: tool_name(...) - with /s flag for multi-line
+                                const toolMatch = resText.match(/CALL: (\w+)\s*\((.*)\)/s);
+                                if (toolMatch) {
+                                    const name = toolMatch[1];
+                                    const argString = toolMatch[2] || "";
+
+                                    let args: any = {};
+                                    // Sophisticated parser for key="value" that handles escaped quotes
+                                    const argRegex = /(\w+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|(\d+)|(true|false))/g;
+                                    let m;
+                                    while ((m = argRegex.exec(argString)) !== null) {
+                                        const key = m[1];
+                                        let val: any = m[2] !== undefined ? m[2] : (m[3] !== undefined ? m[3] : (m[4] !== undefined ? Number(m[4]) : m[5] === "true"));
+
+                                        // Unescape quotes if it was a string
+                                        if (typeof val === 'string') {
+                                            val = val.replace(/\\"/g, '"').replace(/\\'/g, "'").replace(/\\n/g, '\n');
+                                        }
+                                        args[key] = val;
+                                    }
+
+                                    try {
+                                        telemetry.sendAgentUpdate({
+                                            id: task.id,
+                                            persona: task.persona,
+                                            status: "executing",
+                                            lastTool: name,
+                                            turnCount: turn,
+                                            startTime: Date.now()
+                                        });
+
+                                        const toolResult = await runTool(name, args);
+                                        telemetry.sendLog(`[${task.id}] Tool ${name} Success`);
+                                        messages.push({ role: "user", content: `TOOL_RESULT: ${toolResult}` });
+                                        logs.push(`Tool ${name} Result: ${toolResult.substring(0, 500)}...`);
+                                    } catch (e: any) {
+                                        telemetry.sendLog(`[${task.id}] Tool ${name} ERROR: ${e.message}`, "error");
+                                        messages.push({ role: "user", content: `TOOL_ERROR: ${e.message}` });
+                                        logs.push(`Tool ${name} Error: ${e.message}`);
+                                    }
+                                } else {
+                                    break; // Done or no tool called
+                                }
+                                turn++;
                             }
-                        } else {
-                            break; // Done or no tool called
-                        }
-                        turn++;
-                    }
-                    results[task.id] = { output: messages[messages.length-1].content, persona: task.persona, logs };
+                            results[task.id] = { output: messages[messages.length - 1].content, persona: task.persona, logs };
+                        })(),
+                        CONFIG.TIMEOUT_TOTAL_TASK_MS,
+                        `Global Task execution for agent ${task.id}`
+                    );
                 }));
             }
 
             // PHASE 9: Wave Summarization (Condense results of the wave to prevent token bloat)
             const completedWaveTasks = wave;
             if (completedWaveTasks.length >= 1) {
-                 const summaryPersona = personaTemplates.documenter + "\nYou are a concise summarizer. Extract only the key technical findings, file paths, and facts from the following task results. Output a single paragraph of pure fact.";
-                 const waveSummaryPrompt = `Wave Tasks:\n${completedWaveTasks.map(t => `${t.id}: ${t.description}`).join("\n")}\n\nResults:\n${completedWaveTasks.map(t => JSON.stringify(results[t.id])).join("\n\n")}`;
-                 
-                 try {
-                     const summary = await apiThrottler.throttle(() => callOpenRouterApi([
-                         { role: "system", content: summaryPersona },
-                         { role: "user", content: waveSummaryPrompt }
-                     ], ModelManager.getModelForPersona("researcher")));
-                     
-                     const currentWaveIndex = waves.indexOf(wave);
-                     blackboard.set(`wave_summary_${currentWaveIndex}`, summary);
-                     telemetry.sendLog(`[SUMMARIZER] Wave ${currentWaveIndex} results condensed.`);
-                 } catch (e: any) {
-                     telemetry.sendLog(`[SUMMARIZER] Failed to condense wave: ${e.message}`, "warn");
-                 }
+                const summaryPersona = personaTemplates.documenter + "\nYou are a concise summarizer. Extract only the key technical findings, file paths, and facts from the following task results. Output a single paragraph of pure fact.";
+                const waveSummaryPrompt = `Wave Tasks:\n${completedWaveTasks.map(t => `${t.id}: ${t.description}`).join("\n")}\n\nResults:\n${completedWaveTasks.map(t => JSON.stringify(results[t.id])).join("\n\n")}`;
+
+                try {
+                    const summary = await apiThrottler.throttle(() => callOpenRouterApi([
+                        { role: "system", content: summaryPersona },
+                        { role: "user", content: waveSummaryPrompt }
+                    ], ModelManager.getModelForPersona("researcher")));
+
+                    const currentWaveIndex = waves.indexOf(wave);
+                    blackboard.set(`wave_summary_${currentWaveIndex}`, summary);
+                    telemetry.sendLog(`[SUMMARIZER] Wave ${currentWaveIndex} results condensed.`);
+                } catch (e: any) {
+                    telemetry.sendLog(`[SUMMARIZER] Failed to condense wave: ${e.message}`, "warn");
+                }
             }
         }
 
@@ -751,70 +798,70 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     if (request.params.name === "get_critique") {
 
-    interface CritiqueArgs {
-        user_request: string;
-        work_done: string;
-        git_diff_output: string;
-        raw_test_logs: string;
-        conversation_history?: Message[];
-    }
+        interface CritiqueArgs {
+            user_request: string;
+            work_done: string;
+            git_diff_output: string;
+            raw_test_logs: string;
+            conversation_history?: Message[];
+        }
 
-    const {
-        user_request,
-        work_done,
-        git_diff_output,
-        raw_test_logs,
-        conversation_history = [],
-    } = request.params.arguments as unknown as CritiqueArgs;
+        const {
+            user_request,
+            work_done,
+            git_diff_output,
+            raw_test_logs,
+            conversation_history = [],
+        } = request.params.arguments as unknown as CritiqueArgs;
 
-    // Explicitly enforce Nitro tier, discarding any downstream requested models.
-    const critiqueModel = CONFIG.DEFAULT_MODEL;
+        // Explicitly enforce Nitro tier, discarding any downstream requested models.
+        const critiqueModel = CONFIG.DEFAULT_MODEL;
 
-    // Input Validation
-    if (!user_request || user_request.trim().length < 10) {
-        return {
-            content: [{ type: "text", text: "Error: user_request must be at least 10 characters long." }],
-            isError: true,
-        };
-    }
-    if (!work_done || work_done.trim().length < 20) {
-        return {
-            content: [{ type: "text", text: "Error: work_done must be at least 20 characters long." }],
-            isError: true,
-        };
-    }
-    // Strict Regex Validation for legitimate Git diff structures to completely eliminate spoofed hallucinatory payloads
-    const hasValidHunkHeader = /@@ -\d+(,\d+)? \+\d+(,\d+)? @@/.test(git_diff_output);
-    const hasValidGitHeader = /^diff --git a\/.* b\/.*/m.test(git_diff_output);
-    const hasValidIndexHeader = /^index [0-9a-f]+\.\.[0-9a-f]+/m.test(git_diff_output);
-
-    if (!git_diff_output || (!hasValidHunkHeader && !hasValidGitHeader && !hasValidIndexHeader)) {
-        return {
-            content: [{ type: "text", text: "Error: git_diff_output must strictly contain valid structural regex markers (e.g., '@@ -x,y +x,y @@' or 'diff --git a/b/'). Human visual output explicitly prevented via machine-readable headless JSON-RPC mapping." }],
-            isError: true,
-        };
-    }
-    if (!raw_test_logs || raw_test_logs.trim().length <= 4) {
-        return {
-            content: [{ type: "text", text: "Error: raw_test_logs is strictly required. The string must contain at least 5 characters of raw terminal test logs." }],
-            isError: true,
-        };
-    }
-
-    // Zero-Cost Deterministic Pre-Filters
-    const lazyKeywords = ["REDACTED_T_O_D_O", "REDACTED_F_I_X_M_E", "(dots)"];
-    const textToScan = [work_done, git_diff_output, raw_test_logs].join(" ");
-
-    for (const keyword of lazyKeywords) {
-        if (textToScan.includes(keyword)) {
-            const preFilterRejection = `[STATUS]\nREJECTED\n\n[VIOLATIONS]\n4\n\n[CRITIQUE]\nZero-cost pre-filter triggered. The submission contains a forbidden quality marker: "${keyword}".`;
+        // Input Validation
+        if (!user_request || user_request.trim().length < 10) {
             return {
-                content: [{ type: "text", text: preFilterRejection }],
+                content: [{ type: "text", text: "Error: user_request must be at least 10 characters long." }],
+                isError: true,
             };
         }
-    }
+        if (!work_done || work_done.trim().length < 20) {
+            return {
+                content: [{ type: "text", text: "Error: work_done must be at least 20 characters long." }],
+                isError: true,
+            };
+        }
+        // Strict Regex Validation for legitimate Git diff structures to completely eliminate spoofed hallucinatory payloads
+        const hasValidHunkHeader = /@@ -\d+(,\d+)? \+\d+(,\d+)? @@/.test(git_diff_output);
+        const hasValidGitHeader = /^diff --git a\/.* b\/.*/m.test(git_diff_output);
+        const hasValidIndexHeader = /^index [0-9a-f]+\.\.[0-9a-f]+/m.test(git_diff_output);
 
-    const systemPrompt = `Role & Purpose:
+        if (!git_diff_output || (!hasValidHunkHeader && !hasValidGitHeader && !hasValidIndexHeader)) {
+            return {
+                content: [{ type: "text", text: "Error: git_diff_output must strictly contain valid structural regex markers (e.g., '@@ -x,y +x,y @@' or 'diff --git a/b/'). Human visual output explicitly prevented via machine-readable headless JSON-RPC mapping." }],
+                isError: true,
+            };
+        }
+        if (!raw_test_logs || raw_test_logs.trim().length <= 4) {
+            return {
+                content: [{ type: "text", text: "Error: raw_test_logs is strictly required. The string must contain at least 5 characters of raw terminal test logs." }],
+                isError: true,
+            };
+        }
+
+        // Zero-Cost Deterministic Pre-Filters
+        const lazyKeywords = ["REDACTED_T_O_D_O", "REDACTED_F_I_X_M_E", "(dots)"];
+        const textToScan = [work_done, git_diff_output, raw_test_logs].join(" ");
+
+        for (const keyword of lazyKeywords) {
+            if (textToScan.includes(keyword)) {
+                const preFilterRejection = `[STATUS]\nREJECTED\n\n[VIOLATIONS]\n4\n\n[CRITIQUE]\nZero-cost pre-filter triggered. The submission contains a forbidden quality marker: "${keyword}".`;
+                return {
+                    content: [{ type: "text", text: preFilterRejection }],
+                };
+            }
+        }
+
+        const systemPrompt = `Role & Purpose:
 You are the Critic Node in a strict Actor-Critic autonomous agent architecture. You do not write new features, and you do not execute primary tasks. Your sole purpose is to audit, verify, and either approve or reject the work submitted by the Actor agent. You are the final quality control gate.
 
 Operating Stance:
@@ -851,7 +898,7 @@ Provide a concise, blunt explanation of exactly what failed and why. Point to sp
 [REQUIRED ACTION]
 Tell the Actor exactly what they must do to fix the failure before resubmitting. Do not write the code for them; tell them the logical or procedural steps they missed.`;
 
-    const prompt = `
+        const prompt = `
 User Original Request:
 ${user_request}
 
@@ -867,55 +914,55 @@ ${raw_test_logs || "Not provided."}
 Please provide your critique based on the above information.
 `;
 
-    const messages: Message[] = [
-        { role: "system", content: systemPrompt }
-    ];
-    for (const msg of conversation_history) {
-        messages.push(msg);
-    }
-    messages.push({ role: "user", content: prompt });
-
-    try {
-        const critique = await callOpenRouterApi(messages, CONFIG.DEFAULT_MODEL);
-        
-        // Enforcement Layer: Scan for [STATUS] APPROVED
-        if (critique.includes("[STATUS]") && critique.includes("APPROVED")) {
-            // Use internal state setter to bypass sub-agent forgery protection
-            (blackboard as any).state["_sys_critique_status"] = "APPROVED";
-            telemetry.sendLog("[CRITIC] Approval registered in system state.");
-        } else {
-            (blackboard as any).state["_sys_critique_status"] = "REJECTED";
-            telemetry.sendLog("[CRITIC] Work REJECTED. Sensitive tools locked.", "warn");
+        const messages: Message[] = [
+            { role: "system", content: systemPrompt }
+        ];
+        for (const msg of conversation_history) {
+            messages.push(msg);
         }
+        messages.push({ role: "user", content: prompt });
 
-        return {
-            content: [{ type: "text", text: critique }],
-        };
-    } catch (error: any) {
-        return {
-            content: [{ type: "text", text: `Error: ${error.message}` }],
-            isError: true,
-        };
+        try {
+            const critique = await callOpenRouterApi(messages, CONFIG.DEFAULT_MODEL);
+
+            // Enforcement Layer: Scan for [STATUS] APPROVED
+            if (critique.includes("[STATUS]") && critique.includes("APPROVED")) {
+                // Use internal state setter to bypass sub-agent forgery protection
+                (blackboard as any).state["_sys_critique_status"] = "APPROVED";
+                telemetry.sendLog("[CRITIC] Approval registered in system state.");
+            } else {
+                (blackboard as any).state["_sys_critique_status"] = "REJECTED";
+                telemetry.sendLog("[CRITIC] Work REJECTED. Sensitive tools locked.", "warn");
+            }
+
+            return {
+                content: [{ type: "text", text: critique }],
+            };
+        } catch (error: any) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true,
+            };
+        }
     }
-}
 
-throw new Error(`Unknown tool: ${request.params.name}`);
+    throw new Error(`Unknown tool: ${request.params.name}`);
 });
 
 async function main() {
     const transport = new StdioServerTransport();
-    
+
     // Auto-launch Swarm Monitor Dashboard
     if (process.env.MACO_MONITOR !== "false") {
         console.error("[MONITOR] Launching Swarm Dashboard...");
         const monitorPath = path.join(__dirname, "monitor.js");
         // Use 'start cmd /c' for maximum compatibility on Windows if wt is not installed
-        spawn("cmd", ["/c", "start", "node", monitorPath], { 
-            detached: true, 
+        spawn("cmd", ["/c", "start", "node", monitorPath], {
+            detached: true,
             stdio: "ignore",
             shell: true
         }).unref();
-        
+
         telemetry.sendLog("MACO Swarm Monitor initialized");
     }
 

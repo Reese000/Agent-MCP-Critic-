@@ -6,11 +6,11 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts",
-    "test": "npm run build && ts-node src/test_compliance.ts",
+    "dev": "npx ts-node src/index.ts",
+    "test": "npm run build && npx ts-node tests/test_compliance.ts",
     "orchestrate": "npm run build && node dist/orchestrator.js",
-    "test:extended": "npm run build && ts-node tests/integration/verify_api_contract.ts && ts-node tests/integration/verify_fail_safe.ts && ts-node tests/integration/verify_hardening.ts",
-    "healthcheck": "npm run build && ts-node tests/integration/healthcheck_mcp.ts"
+    "test:extended": "npm run build && npx ts-node tests/integration/verify_api_contract.ts && npx ts-node tests/integration/verify_fail_safe.ts && npx ts-node tests/integration/verify_hardening.ts",
+    "healthcheck": "npm run build && npx ts-node tests/integration/healthcheck_mcp.ts"
   },
   "keywords": [],
   "author": "",

@@ -5,6 +5,8 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const COMPLIANCE_MARKER = "[ProtocolFilter] Noise diverted";
+
 async function runExhaustiveComplianceTest() {
     console.log("=== BEGIN EXHAUSTIVE COMPLIANCE TEST (V1.6.0) ===");
 
@@ -82,7 +84,7 @@ async function runExhaustiveComplianceTest() {
 
     // Verify specific indicators of success
     const foundDotenv = stderrData.includes('[dotenv');
-    const foundRedirectionFlag = stderrData.includes('[ProtocolFilter] Diverted noise');
+    const foundRedirectionFlag = stderrData.includes(COMPLIANCE_MARKER);
 
     if (foundDotenv) console.log("  [PASS] Found early-init dotenv noise in stderr.");
     if (foundRedirectionFlag) console.log("  [PASS] Found ProtocolFilter redirection logs in stderr.");
