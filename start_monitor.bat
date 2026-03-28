@@ -2,20 +2,30 @@
 TITLE MACO Swarm CLI Monitor
 cd /d "%~dp0"
 
+echo [DEBUG] Current Directory: %CD%
+echo [DEBUG] Searching for monitor: src/monitor.ts or dist/monitor.js
+
+timeout /t 1 /nobreak > nul
+echo [SYSTEM] Pinning Monitor to Top...
+powershell -ExecutionPolicy Bypass -File scripts\pin_monitor.ps1 || echo [WARNING] Pinning failed.
+
 :RESTART
 echo [%DATE% %TIME%] Starting MACO Swarm Graphical Monitor...
-echo Mode: Checking for compiled assets...
 
 IF EXIST "dist\monitor.js" (
-    echo [MONITOR] Running compiled version [dist\monitor.js]...
+    echo [MONITOR] Running compiled version...
     node dist/monitor.js
 ) ELSE (
-    echo [MONITOR] Compiled version not found. Running TS version via npx...
+    echo [MONITOR] Running TS version via npx...
     npx ts-node --esm src/monitor.ts
 )
 
+if %ERRORLEVEL% NEQ 0 (
+    echo [FATAL] Monitor exited with error code %ERRORLEVEL%.
+    pause
+)
+
 echo.
-echo [%DATE% %TIME%] Monitor exited with code %ERRORLEVEL%. 
-echo Restarting in 5 seconds [Press Ctrl+C to cancel]...
+echo [%DATE% %TIME%] Finalizing turn. Restarting in 5s...
 timeout /t 5
 goto RESTART

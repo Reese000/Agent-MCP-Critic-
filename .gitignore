@@ -11,4 +11,9 @@ aicam_audit_output.json
 api_proof.json
 v1_chat_completions.json
 v1_models.json
+swarm_state.json
+spawn_debug.txt
+monitor_startup.log
+monitor_crash.log
+spawn_trace.txt
 /tmp/

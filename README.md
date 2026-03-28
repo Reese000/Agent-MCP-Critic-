@@ -8,7 +8,8 @@
 - **Dynamic Personas**: Auto-optimized agent prompts for Researchers, Developers, Auditors, and more.
 - **Semantic Code Mapping**: High-density symbol extraction (TS, JS, Py) to minimize token consumption.
 - **Zero-Trust Security**: Multi-layered directory protection and immutable system guards.
-- **Real-Time Telemetry**: Graphical TUI (Terminal User Interface) for live swarm monitoring.
+- **Real-Time Telemetry**: Graphical TUI (Terminal User Interface) with color-coded status, progress bars, and live thought-streaming (Hotkey: `p`).
+- **Agent Visibility Bridge**: Dedicated `swarm_state.json` persistence for machine-level monitoring by other agents.
 
 ## 🚀 Quick Start
 

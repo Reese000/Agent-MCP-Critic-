@@ -9,14 +9,17 @@ import net from "net";
 export interface AgentState {
     id: string;
     persona: string;
-    status: "idle" | "reasoning" | "executing";
+    status: "idle" | "reasoning" | "executing" | "error";
     lastTool?: string;
     turnCount: number;
     startTime: number;
+    endTime?: number;
+    progress?: number; // 0-100
+    streamingOutput?: string; // Latest text chunk or thinking
 }
 
 export interface SwarmUpdate {
-    type: "agent_update" | "blackboard_update" | "log_append" | "heartbeat";
+    type: "agent_update" | "blackboard_update" | "log_append" | "heartbeat" | "streaming_update";
     data: any;
 }
 
@@ -28,7 +31,7 @@ class TelemetryBroadcaster {
     constructor() {
         this.server = net.createServer((socket) => {
             this.clients.push(socket);
-            
+
             // CRITICAL: Cleanup to prevent memory leaks and write errors
             socket.setNoDelay(true);
             socket.setKeepAlive(true, 10000); // 10s keepalive
@@ -36,7 +39,7 @@ class TelemetryBroadcaster {
             socket.on("close", () => {
                 this.clients = this.clients.filter(c => c !== socket);
             });
-            
+
             socket.on("error", (err: any) => {
                 if (err.code !== "ECONNRESET") {
                     console.error(`[TELEMETRY] Socket error: ${err.message}`);
@@ -96,6 +99,10 @@ class TelemetryBroadcaster {
 
     sendBlackboardUpdate(key: string, value: string) {
         this.broadcast({ type: "blackboard_update", data: { key, value } });
+    }
+
+    sendStreamingUpdate(agentId: string, chunk: string) {
+        this.broadcast({ type: "streaming_update", data: { id: agentId, chunk } });
     }
 
     sendLog(message: string, level: "info" | "warn" | "error" = "info") {
