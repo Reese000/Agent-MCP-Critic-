@@ -12,7 +12,9 @@
     "test:extended": "npm run build && npx ts-node tests/integration/verify_api_contract.ts && npx ts-node tests/integration/verify_fail_safe.ts && npx ts-node tests/integration/verify_hardening.ts",
     "healthcheck": "npm run build && npx ts-node tests/integration/healthcheck_mcp.ts",
     "monitor": "node dist/monitor.js",
-    "monitor:dev": "npx ts-node --esm src/monitor.ts"
+    "monitor:dev": "npx ts-node --esm src/monitor.ts",
+    "troubleshoot": "npx ts-node --esm scripts/troubleshoot.ts",
+    "verify-all": "npm run build && npm run test && npm run test:extended && npm run healthcheck"
   },
   "keywords": [],
   "author": "",

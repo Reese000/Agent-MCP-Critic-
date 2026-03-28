@@ -951,6 +951,11 @@ Raw Test Logs: ${raw_test_logs}
 }
 
 async function runServer() {
+    console.error(`[CRITIC-INIT] Critic MCP Server v${CONFIG.VERSION} starting...`);
+    console.error(`[CRITIC-INIT] Default Model: ${CONFIG.DEFAULT_MODEL}`);
+    console.error(`[CRITIC-INIT] Heavy Reasoning: ${CONFIG.HEAVY_REASONING_MODEL}`);
+    console.error(`[CRITIC-INIT] Fallback: ${CONFIG.FALLBACK_MODEL}`);
+
     const transport = new StdioServerTransport();
     await server.connect(transport);
     console.error("Critic MCP Server running on stdio (Filtered)");
