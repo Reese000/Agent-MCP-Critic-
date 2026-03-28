@@ -16,7 +16,7 @@ export interface AgentState {
 }
 
 export interface SwarmUpdate {
-    type: "agent_update" | "bb_update" | "log_append";
+    type: "agent_update" | "blackboard_update" | "log_append" | "heartbeat";
     data: any;
 }
 
@@ -30,14 +30,27 @@ class TelemetryBroadcaster {
             this.clients.push(socket);
             
             // CRITICAL: Cleanup to prevent memory leaks and write errors
+            socket.setNoDelay(true);
+            socket.setKeepAlive(true, 10000); // 10s keepalive
+
             socket.on("close", () => {
                 this.clients = this.clients.filter(c => c !== socket);
             });
             
-            socket.on("error", () => {
+            socket.on("error", (err: any) => {
+                if (err.code !== "ECONNRESET") {
+                    console.error(`[TELEMETRY] Socket error: ${err.message}`);
+                }
                 this.clients = this.clients.filter(c => c !== socket);
+                socket.destroy();
             });
         });
+
+        // Periodic Heartbeat to keep connections alive and detect dead peers
+        setInterval(() => {
+            this.broadcast({ type: "heartbeat", data: { timestamp: Date.now() } });
+        }, 30000);
+
 
         // CRITICAL: Handling EADDRINUSE gracefully to prevent process crash
         this.server.on("error", (e: any) => {
@@ -60,9 +73,13 @@ class TelemetryBroadcaster {
     broadcast(update: SwarmUpdate) {
         const payload = JSON.stringify(update) + "\n";
         this.clients = this.clients.filter(client => {
-            if (client.writable) {
+            if (client.writable && !client.destroyed) {
                 try {
-                    client.write(payload);
+                    const success = client.write(payload);
+                    if (!success) {
+                        // Buffer full, wait for drain or destroy if it hangs too long
+                        // For now we just return true and hope it drains
+                    }
                     return true;
                 } catch (e) {
                     client.destroy();
@@ -78,7 +95,7 @@ class TelemetryBroadcaster {
     }
 
     sendBlackboardUpdate(key: string, value: string) {
-        this.broadcast({ type: "bb_update", data: { key, value } });
+        this.broadcast({ type: "blackboard_update", data: { key, value } });
     }
 
     sendLog(message: string, level: "info" | "warn" | "error" = "info") {

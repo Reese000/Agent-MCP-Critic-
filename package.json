@@ -10,7 +10,9 @@
     "test": "npm run build && npx ts-node tests/test_compliance.ts",
     "orchestrate": "npm run build && node dist/orchestrator.js",
     "test:extended": "npm run build && npx ts-node tests/integration/verify_api_contract.ts && npx ts-node tests/integration/verify_fail_safe.ts && npx ts-node tests/integration/verify_hardening.ts",
-    "healthcheck": "npm run build && npx ts-node tests/integration/healthcheck_mcp.ts"
+    "healthcheck": "npm run build && npx ts-node tests/integration/healthcheck_mcp.ts",
+    "monitor": "node dist/monitor.js",
+    "monitor:dev": "npx ts-node --esm src/monitor.ts"
   },
   "keywords": [],
   "author": "",
@@ -25,6 +27,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
+    "@types/blessed-contrib": "^4.0.5",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
   }

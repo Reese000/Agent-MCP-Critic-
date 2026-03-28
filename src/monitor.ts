@@ -1,6 +1,12 @@
-import blessed from "blessed";
-import contrib from "blessed-contrib";
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+const blessed = require("blessed");
+const contrib = require("blessed-contrib");
 import net from "net";
+import dotenv from "dotenv";
+
+// Load environment variables for the monitor
+dotenv.config();
 
 /**
  * monitor.ts
@@ -70,9 +76,11 @@ interface SwarmUpdate {
 const agentState: Record<string, any> = {};
 const blackboardState: Record<string, any> = {};
 
+const TELEMETRY_PORT = Number(process.env.MACO_TELEMETRY_PORT) || 3001;
+
 // Connect to Telemetry Server with Reconnection Logic
 function connect() {
-    const client = net.createConnection({ port: 3001 });
+    const client = net.createConnection({ port: TELEMETRY_PORT, host: "127.0.0.1" });
 
     client.on("connect", () => {
         logBox.log("{blue-fg}CONNECTED to MACO Swarm Telemetry{/blue-fg}");
@@ -108,7 +116,7 @@ function connect() {
                     });
                 }
 
-                if (raw.type === "bb_update") {
+                if (raw.type === "blackboard_update") {
                     blackboardState[raw.data.key] = raw.data.value;
 
                     const treeData: any = {
@@ -136,8 +144,8 @@ function connect() {
     });
 
     client.on("error", (err: any) => {
-        if (err.code === "ECONNREFUSED") {
-            // Silently wait for server to start
+        if (err.code === "ECONNREFUSED" || err.code === "ECONNRESET") {
+            // Silently wait for server to start/restart
         } else {
             logBox.log(`{red-fg}[ERROR] Telemetry: ${err.message}{/}`);
             requestRender();
