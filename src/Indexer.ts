@@ -1,4 +1,5 @@
 import { FilesystemHandler } from "./FilesystemHandler.js";
+import fsPromises from "fs/promises";
 import path from "path";
 
 /**
@@ -9,17 +10,18 @@ import path from "path";
 export class CodeIndexer {
     private static readonly EXCLUDED_DIRS = ["node_modules", ".git", "dist", "build", ".next", ".antigravity", "venv", "__pycache__"];
     private static readonly SUPPORTED_EXT = [".ts", ".js", ".py", ".md", ".tsx", ".jsx", ".pyi"];
-    private static readonly MAX_FILE_SIZE_BYTES = 51200; // 50KB
+    private static readonly MAX_FILE_SIZE_BYTES = 102400; // 100KB (Increased)
 
     /**
      * Builds a condensed map of all file paths and their core function/class definitions.
      */
     static async buildMap(root: string): Promise<string> {
-        const allFiles = await FilesystemHandler.search(root, ".*"); 
+        // Use the new hardened search
+        const allFiles = await FilesystemHandler.search(root, "*"); 
         
-        // Filter out excluded directories and unsupported extensions
         const files = allFiles.filter(f => {
-            const isExcluded = this.EXCLUDED_DIRS.some(d => f.includes(path.sep + d + path.sep) || f.endsWith(path.sep + d));
+            const relPath = path.relative(root, f);
+            const isExcluded = this.EXCLUDED_DIRS.some(d => relPath.includes(path.sep + d + path.sep) || relPath.startsWith(d + path.sep) || relPath === d);
             const hasExt = this.SUPPORTED_EXT.includes(path.extname(f));
             return !isExcluded && hasExt;
         });
@@ -29,43 +31,45 @@ export class CodeIndexer {
         
         for (const file of files) {
             const relPath = path.relative(root, file).split(path.sep).join("/");
-            console.error(`[INDEXER DEBUG] Processing ${relPath}`);
             
             try {
-                const content = await FilesystemHandler.read(file);
-                console.error(`[INDEXER DEBUG] ${relPath} size: ${content.length}`);
-                if (content.length > CodeIndexer.MAX_FILE_SIZE_BYTES) {
-                    console.error(`[INDEXER DEBUG] ${relPath} TOO LARGE, SKIPPING SYMBOLS`);
-                    map += `- ${relPath}\n`;
-                    map += `  [Symbols Skipped: File too large]\n`;
+                const stats = await fsPromises.stat(file);
+                if (stats.size > CodeIndexer.MAX_FILE_SIZE_BYTES) {
+                    map += `- ${relPath} [Skipped: Large File - ${Math.round(stats.size/1024)}KB]\n`;
                     continue;
                 }
+
+                const content = await FilesystemHandler.read(file);
                 map += `- ${relPath}\n`;
-                const lines = content.split("\n").slice(0, 300); 
                 
                 const symbols: string[] = [];
-                const classRegex = /(?:export\s+)?class\s+(\w+)/g;
-                const funcRegex = /(?:export\s+)?(?:async\s+)?function\s+(\w+)/g;
-                const arrowRegex = /export\s+const\s+(\w+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>/g;
-                const pyDefRegex = /def\s+(\w+)\(/g;
-                const pyClassRegex = /class\s+(\w+)(?:\(.*\))?:/g;
+                // Hardened Regexes
+                const classRegex = /(?:export\s+)?class\s+([a-zA-Z0-9_$]+)/g;
+                const funcRegex = /(?:export\s+)?(?:async\s+)?function\s+([a-zA-Z0-9_$]+)/g;
+                const arrowRegex = /export\s+const\s+([a-zA-Z0-9_$]+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>/g;
+                const pyDefRegex = /def\s+([a-zA-Z0-9_$]+)\(/g;
+                const pyClassRegex = /class\s+([a-zA-Z0-9_$]+)(?:\(.*\))?:/g;
 
-                const joined = lines.join("\n");
-                let match;
+                // Only scan first 500 lines for efficiency, skipping extremely long minified lines
+                const MAX_LINE_LENGTH = 1000;
+                const scanContent = content.split("\n")
+                    .slice(0, 500)
+                    .filter(line => line.length < MAX_LINE_LENGTH)
+                    .join("\n");
                 
-                while ((match = classRegex.exec(joined)) !== null) symbols.push(`Class:${match[1]}`);
-                while ((match = funcRegex.exec(joined)) !== null) symbols.push(`Func:${match[1]}`);
-                while ((match = arrowRegex.exec(joined)) !== null) symbols.push(`Arrow:${match[1]}`);
-                while ((match = pyDefRegex.exec(joined)) !== null) symbols.push(`def:${match[1]}`);
-                while ((match = pyClassRegex.exec(joined)) !== null) symbols.push(`class:${match[1]}`);
+                let match;
+                while ((match = classRegex.exec(scanContent)) !== null) symbols.push(`class ${match[1]}`);
+                while ((match = funcRegex.exec(scanContent)) !== null) symbols.push(`func ${match[1]}`);
+                while ((match = arrowRegex.exec(scanContent)) !== null) symbols.push(`const ${match[1]}`);
+                while ((match = pyDefRegex.exec(scanContent)) !== null) symbols.push(`def ${match[1]}`);
+                while ((match = pyClassRegex.exec(scanContent)) !== null) symbols.push(`cls ${match[1]}`);
                 
                 if (symbols.length > 0) {
                     const unique = Array.from(new Set(symbols));
                     map += `  Symbols: ${unique.join(", ")}\n`;
                 }
             } catch (e: any) {
-                console.warn(`[INDEXER WARNING] Failed to process ${relPath}: ${e.message}`);
-                map += `  [Symbols Skipped: Read Error]\n`;
+                map += `- ${relPath} [Skipped: Read Error]\n`;
             }
         }
         
@@ -79,7 +83,8 @@ export class CodeIndexer {
         const results = await FilesystemHandler.grep(root, query);
         let output = "";
         for (const [file, matches] of Object.entries(results)) {
-            output += `FILE: ${file}\n${matches.join("\n")}\n\n`;
+            const relPath = path.relative(root, file).split(path.sep).join("/");
+            output += `FILE: ${relPath}\n${matches.join("\n")}\n\n`;
         }
         return output || "No matches found.";
     }

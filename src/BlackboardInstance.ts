@@ -42,8 +42,22 @@ class InstrumentedBlackboard extends BaseBlackboard {
     }
 
     clear(): void {
+        const all = this.getAll();
+        const preserved: Record<string, any> = {};
+        for (const key of Object.keys(all)) {
+            if (key.startsWith("_sys_")) {
+                preserved[key] = all[key];
+            }
+        }
+
         super.clear();
-        telemetry.sendLog(`[BLACKBOARD] State cleared`, "warn");
+
+        // Restore preserved keys directly into the state to bypass the 'set' block
+        for (const [key, value] of Object.entries(preserved)) {
+            (this as any).state[key] = value;
+        }
+
+        telemetry.sendLog(`[BLACKBOARD] State cleared (System state preserved)`, "warn");
     }
 }
 

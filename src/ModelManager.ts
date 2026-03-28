@@ -10,12 +10,12 @@ export interface ModelConfig {
 }
 
 const MODELS: ModelConfig = {
-    // google/gemini-2.5-flash-lite is chosen for its extreme cost-efficiency and performance
-    cheap: "google/gemini-2.5-flash-lite-preview-09-2025",
-    // Claude 3.5 Sonnet for capable tasks
-    capable: "anthropic/claude-3.5-sonnet",
-    // reasoning tasks
-    reasoning: "openai/o1-mini"
+    // google/gemini-2.5-flash-lite for simple tasks
+    cheap: process.env.CRITIC_SIMPLE_MODEL || "google/gemini-2.5-flash-lite-preview-09-2025",
+    // MiniMax m2.7 for general purpose tasks
+    capable: process.env.CRITIC_DEFAULT_MODEL || "minimax/minimax-m2.7",
+    // Gemini 3.1 Pro Preview for ultra high reasoning tasks
+    reasoning: process.env.CRITIC_HEAVY_MODEL || "google/gemini-3.1-pro-preview-09-2025"
 };
 
 export class ModelManager {
@@ -29,6 +29,11 @@ export class ModelManager {
         // Discovery and Documentation are low-complexity, high-volume: use Cheap
         if (p.includes("researcher") || p.includes("documenter") || p.includes("anti-bloat") || p.includes("ux_auditor")) {
             return MODELS.cheap;
+        }
+
+        // Orchestrators and Optimizers are high-complexity: use Reasoning
+        if (p.includes("orchestrator") || p.includes("optimizer") || p.includes("architect")) {
+            return MODELS.reasoning;
         }
 
         // Feature development and specialized testing: use Capable

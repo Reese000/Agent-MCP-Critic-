@@ -66,80 +66,91 @@ interface SwarmUpdate {
     logs?: LogEntry[];
 }
 
-// Connect to Telemetry Server
-const client = net.createConnection({ port: 3001 }, () => {
-    logBox.log("{blue-fg}CONNECTED to MACO Swarm Telemetry{/blue-fg}");
-    requestRender();
-});
-
 // Global State for the Monitor
 const agentState: Record<string, any> = {};
 const blackboardState: Record<string, any> = {};
 
-let buffer = "";
-client.on("data", (data) => {
-    buffer += data.toString();
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || ""; // Keep the last partial line
+// Connect to Telemetry Server with Reconnection Logic
+function connect() {
+    const client = net.createConnection({ port: 3001 });
 
-    for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-            const raw = JSON.parse(line);
+    client.on("connect", () => {
+        logBox.log("{blue-fg}CONNECTED to MACO Swarm Telemetry{/blue-fg}");
+        requestRender();
+    });
 
-            // Handle the wrapped format from Telemetry.ts
-            if (raw.type === "agent_update") {
-                const state = raw.data;
-                agentState[state.id] = state;
-                
-                const tableData = Object.entries(agentState).map(([id, s]: [string, any]) => [
-                    id.substring(0, 8),
-                    s.persona.substring(0, 28),
-                    s.status.toUpperCase(),
-                    `${Math.round((s.endTime ? s.endTime - s.startTime : Date.now() - s.startTime) / 1000)}s`,
-                    s.lastTool || ""
-                ]);
-                agentTable.setData({
-                    headers: ["ID", "PERSONA", "STATUS", "UPTIME", "LAST TOOL"],
-                    data: tableData
-                });
+    let buffer = "";
+    client.on("data", (data) => {
+        buffer += data.toString();
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || ""; // Keep the last partial line
+
+        for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+                const raw = JSON.parse(line);
+
+                // Handle the wrapped format from Telemetry.ts
+                if (raw.type === "agent_update") {
+                    const state = raw.data;
+                    agentState[state.id] = state;
+                    
+                    const tableData = Object.entries(agentState).map(([id, s]: [string, any]) => [
+                        id.substring(0, 8),
+                        s.persona.substring(0, 28),
+                        s.status.toUpperCase(),
+                        `${Math.round((s.endTime ? s.endTime - s.startTime : Date.now() - s.startTime) / 1000)}s`,
+                        s.lastTool || ""
+                    ]);
+                    agentTable.setData({
+                        headers: ["ID", "PERSONA", "STATUS", "UPTIME", "LAST TOOL"],
+                        data: tableData
+                    });
+                }
+
+                if (raw.type === "bb_update") {
+                    blackboardState[raw.data.key] = raw.data.value;
+
+                    const treeData: any = {
+                        name: "Blackboard",
+                        extended: true,
+                        children: {}
+                    };
+                    Object.entries(blackboardState).forEach(([k, v]) => {
+                        const valStr = typeof v === "object" ? JSON.stringify(v) : String(v);
+                        treeData.children[`${k}: ${valStr.substring(0, 30)}${valStr.length > 30 ? "..." : ""}`] = { name: k };
+                    });
+                    bbTree.setData(treeData);
+                }
+
+                if (raw.type === "log_append") {
+                    const log = raw.data;
+                    const color = log.level === "error" ? "{red-fg}" : (log.level === "warn" ? "{yellow-fg}" : "");
+                    logBox.log(`${color}[${log.level.toUpperCase()}] ${log.message}{/}`);
+                }
+            } catch (e) {
+                // Ignore parse errors for malformed lines
             }
-
-            if (raw.type === "bb_update") {
-                blackboardState[raw.data.key] = raw.data.value;
-
-                const treeData: any = {
-                    name: "Blackboard",
-                    extended: true,
-                    children: {}
-                };
-                Object.entries(blackboardState).forEach(([k, v]) => {
-                    treeData.children[`${k}: ${String(v).substring(0, 20)}...`] = { name: k };
-                });
-                bbTree.setData(treeData);
-            }
-
-            if (raw.type === "log_append") {
-                const log = raw.data;
-                const color = log.level === "error" ? "{red-fg}" : (log.level === "warn" ? "{yellow-fg}" : "");
-                logBox.log(`${color}[${log.level.toUpperCase()}] ${log.message}{/}`);
-            }
-        } catch (e) {
-            // Ignore parse errors for malformed lines
         }
-    }
-    requestRender();
-});
+        requestRender();
+    });
 
-client.on("error", (err) => {
-    logBox.log(`{red-fg}[ERROR] Telemetry connection failed: ${err.message}{/}`);
-    requestRender();
-});
+    client.on("error", (err: any) => {
+        if (err.code === "ECONNREFUSED") {
+            // Silently wait for server to start
+        } else {
+            logBox.log(`{red-fg}[ERROR] Telemetry: ${err.message}{/}`);
+            requestRender();
+        }
+    });
 
-client.on("error", (e) => {
-    logBox.log(`{red-fg}Connection Error: ${e.message}{/red-fg}`);
-    requestRender();
-});
+    client.on("close", () => {
+        // Attempt reconnection after 3 seconds
+        setTimeout(connect, 3000);
+    });
+}
+
+connect();
 
 screen.key(["escape", "q", "C-c"], () => {
     process.exit(0);

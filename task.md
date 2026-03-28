@@ -1,0 +1,20 @@
+- [x] Setup UX Auditor Swarm
+    - [x] Create `tests/ux_auditor_swarm.ts` with the 3-wave design.
+- [/] Execute Audit (Wave 1) (IN PROGRESS)
+- [x] Execute Audit (Wave 1) (IN PROGRESS)
+    - [x] Run Newbie auditor (Discovery friction).
+    - [x] Run Power User auditor (Refactor complexity).
+    - [x] Run Security Skeptic auditor (Boundary testing).
+    - [x] Run Ergonomist auditor (CLI response clarity).
+- [x] Consolidate Findings (Wave 2)
+    - [x] Generate `UX_FRICTION_REPORT.md` from blackboard keys.
+- [x] System Hardening (Wave 3)
+    - [x] Task "The Architect" to implement at least 3 usability fixes.
+    - [x] Verify improvements with a final test run.
+- [x] Reporting
+    - [x] Finalize `walkthrough.md`.
+- [x] Create UX Auditor Swarm (Wave 1: Personas, Wave 2: Consolidator, Wave 3: Architect)
+- [x] Run UX Auditor Swarm and capture findings
+- [x] Review and implement automated usability improvements
+- [x] Verify system hardening and model tiering compliance
+- [x] Finalize Walkthrough and Project Documentationd`.

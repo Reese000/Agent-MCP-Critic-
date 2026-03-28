@@ -60,12 +60,13 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 const CONFIG = {
-    DEFAULT_MODEL: "google/gemini-2.5-flash-lite-preview-09-2025",
-    FALLBACK_MODEL: "gemini-flash-latest",
-    OPENROUTER_FALLBACK: "google/gemini-2.0-flash-001",
-    VERSION: "2.2.0",
-    TIMEOUT_AGENT_TURN_MS: Number(process.env.TIMEOUT_AGENT_TURN_MS) || 60000,
-    TIMEOUT_TOTAL_TASK_MS: Number(process.env.TIMEOUT_TOTAL_TASK_MS) || 300000
+    DEFAULT_MODEL: process.env.CRITIC_DEFAULT_MODEL || "minimax/minimax-m2.7",
+    HEAVY_REASONING_MODEL: process.env.CRITIC_HEAVY_MODEL || "google/gemini-3.1-pro-preview-09-2025",
+    FALLBACK_MODEL: process.env.CRITIC_FALLBACK_MODEL || "google/gemini-2.5-flash-lite-preview-09-2025",
+    OPENROUTER_FALLBACK: process.env.CRITIC_OR_FALLBACK || "google/gemini-2.0-flash-001",
+    VERSION: "2.3.1",
+    TIMEOUT_AGENT_TURN_MS: Number(process.env.TIMEOUT_AGENT_TURN_MS) || 120000,
+    TIMEOUT_TOTAL_TASK_MS: Number(process.env.TIMEOUT_TOTAL_TASK_MS) || 600000
 };
 
 const HAS_UNAVAILABLE_LOCAL_PROXY = /(?:^|:\/\/)(?:127\.0\.0\.1|localhost):8080(?:$|[/?])/i.test(
@@ -387,6 +388,14 @@ export interface Message {
     content: string;
 }
 
+interface CritiqueArgs {
+    user_request: string;
+    work_done: string;
+    git_diff_output: string;
+    raw_test_logs: string;
+    conversation_history?: Message[];
+}
+
 async function callGeminiApi(messages: Message[], model: string = CONFIG.FALLBACK_MODEL) {
     if (!GEMINI_API_KEY) {
         throw new Error("Missing GEMINI_API_KEY. Please check your .env file.");
@@ -491,6 +500,82 @@ async function callOpenRouterApi(messages: Message[], model: string = CONFIG.DEF
     }
 }
 
+export class ToolDispatcher {
+    /**
+     * Unified entry point for all tool execution, enforcing security and protocol layers.
+     */
+    static async dispatch(name: string, rawArgs: any): Promise<string> {
+        // 1. Argument Normalization
+        const args: any = { ...rawArgs };
+        const normalizedPath = args.path || args.file_path || args.filepath || args.target;
+        const normalizedContent = args.content || args.data || args.text;
+
+        // 2. Protocol Enforcement Check
+        const requiresApproval = ["fs_write", "fs_delete", "fs_execute"].includes(name);
+        if (requiresApproval && blackboard.get("_sys_critique_status") !== "APPROVED") {
+            const msg = `PROTOCOL VIOLATION: ${name} denied. No 'APPROVED' critique found in system memory. You MUST call 'get_critique' and receive approval before performing destructive or file-modifying operations.`;
+            return msg;
+        }
+
+        // 3. Dispatch to Handlers
+        try {
+            switch (name) {
+                case "fs_list":
+                    if (!normalizedPath) throw new Error("Missing 'path' argument.");
+                    return JSON.stringify(await FilesystemHandler.list(normalizedPath));
+                case "fs_read":
+                    if (!normalizedPath) throw new Error("Missing 'path' argument.");
+                    return await FilesystemHandler.read(normalizedPath);
+                case "fs_write":
+                    if (!normalizedPath || normalizedContent === undefined) throw new Error("Missing 'path' or 'content' argument.");
+                    return await FilesystemHandler.write(normalizedPath, normalizedContent, !!args.append);
+                case "fs_mkdir":
+                    if (!normalizedPath) throw new Error("Missing 'path' argument.");
+                    return await FilesystemHandler.mkdir(normalizedPath);
+                case "fs_delete":
+                    if (!normalizedPath) throw new Error("Missing 'path' argument.");
+                    return await FilesystemHandler.delete(normalizedPath);
+                case "bb_get":
+                    if (!args.key) throw new Error("Missing 'key' argument.");
+                    return blackboard.get(args.key) || "Key not found.";
+                case "bb_set":
+                    if (!args.key || args.value === undefined) throw new Error("Missing 'key' or 'value' argument.");
+                    blackboard.set(args.key, args.value);
+                    return `Successfully set ${args.key} on blackboard.`;
+                case "bb_list":
+                    return JSON.stringify(blackboard.getAll(), null, 2);
+                case "bb_clear":
+                    blackboard.clear();
+                    return "Blackboard cleared.";
+                case "code_index":
+                    if (!normalizedPath) throw new Error("Missing 'path' argument.");
+                    const absIndexPath = path.isAbsolute(normalizedPath) ? normalizedPath : path.join(process.cwd(), normalizedPath);
+                    return await CodeIndexer.buildMap(absIndexPath);
+                case "code_search":
+                    if (!normalizedPath || !args.query) throw new Error("Missing 'path' or 'query' argument.");
+                    const absSearchPath = path.isAbsolute(normalizedPath) ? normalizedPath : path.join(process.cwd(), normalizedPath);
+                    return await CodeIndexer.semanticSearch(absSearchPath, args.query);
+                case "fs_search":
+                    if (!normalizedPath || !args.pattern) throw new Error("Missing 'path' or 'pattern' argument.");
+                    return JSON.stringify(await FilesystemHandler.search(normalizedPath, args.pattern));
+                case "fs_grep":
+                    if (!normalizedPath || !args.pattern) throw new Error("Missing 'path' or 'pattern' argument.");
+                    return JSON.stringify(await FilesystemHandler.grep(normalizedPath, args.pattern));
+                case "fs_execute":
+                    if (!args.command || !normalizedPath) throw new Error("Missing 'command' or 'path' argument.");
+                    const execRes = await TerminalHandler.execute(args.command, normalizedPath, args.timeout);
+                    return `EXIT CODE: ${execRes.exitCode}\nSTDOUT:\n${execRes.stdout}\nSTDERR:\n${execRes.stderr}`;
+                case "get_critique":
+                    return await performCritique(args as unknown as CritiqueArgs);
+                default: 
+                    throw new Error(`Unknown tool: ${name}`);
+            }
+        } catch (error: any) {
+            return `ERROR (${name}): ${error.message}`;
+        }
+    }
+}
+
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [CRITIQUE_TOOL, AGENT_DEBATE_TOOL, PARALLEL_ORCHESTRATOR_TOOL, FS_LIST_TOOL, FS_READ_TOOL, FS_WRITE_TOOL, FS_MKDIR_TOOL, FS_DELETE_TOOL, BB_GET_TOOL, BB_SET_TOOL, BB_LIST_TOOL, BB_CLEAR_TOOL, FS_SEARCH_TOOL, FS_GREP_TOOL, FS_EXECUTE_TOOL, CODE_INDEX_TOOL, CODE_SEARCH_TOOL],
 }));
@@ -576,75 +661,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const resolvePersona = (p: string) => {
             const base = personaTemplates[p] || p;
             const bbState = JSON.stringify(blackboard.getAll());
-            return `${base}\n\nTOOL_USE_PROTOCOL: You can interact with the local filesystem and the shared Blackboard. You MUST use the following format for tool calls:\nCALL: tool_name(arg1="val1", arg2="val2")\n\nBLACKBOARD STATE: ${bbState}\n\nRULES:\n1. Only use ONE 'CALL:' per message.\n2. Always wait for the TOOL_RESULT before making your next call.\n3. Wrap all string arguments in double quotes.\n4. When using 'bb_set', describe the discovery so other agents know what happened.\n\nAVAILABLE TOOLS:\n- fs_list(path="...")\n- fs_read(path="...")\n- fs_write(path="...", content="...", [append=true])\n- fs_mkdir(path="...")\n- fs_delete(path="...")\n- fs_search(path="...", pattern="...")\n- fs_grep(path="...", pattern="...")\n- fs_execute(command="...", path="...", [timeout=30000])\n- bb_get(key="...")\n- bb_set(key="...", value="...")\n- bb_list()\n- bb_clear()`;
+            return `${base}\n\nTOOL_USE_PROTOCOL: You can interact with the local filesystem and the shared Blackboard. You MUST use the following format for tool calls:\nCALL: tool_name(arg1="val1", arg2="val2")\n\nBLACKBOARD STATE: ${bbState}\n\nRULES:\n1. Only use ONE 'CALL:' per message.\n2. Always wait for the TOOL_RESULT before making your next call.\n3. Wrap all string arguments in double quotes.\n4. When using 'bb_set', describe the discovery so other agents know what happened.\n\nAVAILABLE TOOLS:\n- fs_list(path="...")\n- fs_read(path="...")\n- fs_write(path="...", content="...", [append=true])\n- fs_mkdir(path="...")\n- fs_delete(path="...")\n- fs_search(path="...", pattern="...")
+- fs_grep(path="...", pattern="...")
+- fs_execute(command="...", path="...", [timeout=30000])
+- get_critique(user_request="...", work_done="...", git_diff_output="...", raw_test_logs="...")
+- bb_get(key="...")
+- bb_set(key="...", value="...")\n- bb_list()\n- bb_clear()`;
         };
 
-        const runTool = async (name: string, args: any) => {
-            console.error(`[ORCHESTRATOR] Executing Local Tool: ${name} with args:`, args);
-
-            // Normalize path-like arguments
-            const normalizedPath = args.path || args.file_path || args.filepath || args.target;
-            const normalizedContent = args.content || args.data || args.text;
-
-            switch (name) {
-                case "fs_list":
-                    if (!normalizedPath) throw new Error("Missing 'path' argument for fs_list.");
-                    return JSON.stringify(await FilesystemHandler.list(normalizedPath));
-                case "fs_read":
-                    if (!normalizedPath) throw new Error("Missing 'path' argument for fs_read.");
-                    return await FilesystemHandler.read(normalizedPath);
-                case "fs_write":
-                    if (!normalizedPath || normalizedContent === undefined) throw new Error("Missing 'path' or 'content' argument for fs_write.");
-                    // Enforcement Layer Check
-                    if (blackboard.get("_sys_critique_status") !== "APPROVED") {
-                        throw new Error("PROTOCOL VIOLATION: fs_write denied. No 'APPROVED' critique found in system state. You MUST call get_critique and receive approval before modifying the filesystem.");
-                    }
-                    return await FilesystemHandler.write(normalizedPath, normalizedContent, !!args.append);
-                case "fs_mkdir":
-                    if (!normalizedPath) throw new Error("Missing 'path' argument for fs_mkdir.");
-                    return await FilesystemHandler.mkdir(normalizedPath);
-                case "fs_delete":
-                    if (!normalizedPath) throw new Error("Missing 'path' argument for fs_delete.");
-                    // Enforcement Layer Check
-                    if (blackboard.get("_sys_critique_status") !== "APPROVED") {
-                        throw new Error("PROTOCOL VIOLATION: fs_delete denied. No 'APPROVED' critique found in system state. You MUST call get_critique and receive approval before deleting files.");
-                    }
-                    return await FilesystemHandler.delete(normalizedPath);
-                case "bb_get":
-                    if (!args.key) throw new Error("Missing 'key' argument for bb_get.");
-                    return blackboard.get(args.key) || "Key not found.";
-                case "bb_set":
-                    if (!args.key || args.value === undefined) throw new Error("Missing 'key' or 'value' argument for bb_set.");
-                    blackboard.set(args.key, args.value);
-                    return `Successfully set ${args.key} on blackboard.`;
-                case "bb_list":
-                    return JSON.stringify(blackboard.getAll(), null, 2);
-                case "bb_clear":
-                    blackboard.clear();
-                    return "Blackboard cleared.";
-                case "code_index":
-                    const normalizedIndexPath = path.isAbsolute(args.path) ? args.path : path.join(process.cwd(), args.path);
-                    return await CodeIndexer.buildMap(normalizedIndexPath);
-                case "code_search":
-                    const normalizedSearchPath = path.isAbsolute(args.path) ? args.path : path.join(process.cwd(), args.path);
-                    return JSON.stringify(await CodeIndexer.semanticSearch(normalizedSearchPath, args.query));
-                case "fs_search":
-                    if (!normalizedPath || !args.pattern) throw new Error("Missing 'path' or 'pattern' argument for fs_search.");
-                    return JSON.stringify(await FilesystemHandler.search(normalizedPath, args.pattern));
-                case "fs_grep":
-                    if (!normalizedPath || !args.pattern) throw new Error("Missing 'path' or 'pattern' argument for fs_grep.");
-                    return JSON.stringify(await FilesystemHandler.grep(normalizedPath, args.pattern));
-                case "fs_execute":
-                    if (!args.command || !normalizedPath) throw new Error("Missing 'command' or 'path' argument for fs_execute.");
-                    // Enforcement Layer Check
-                    if (blackboard.get("_sys_critique_status") !== "APPROVED") {
-                        throw new Error("PROTOCOL VIOLATION: fs_execute denied. No 'APPROVED' critique found in system state. You MUST call get_critique and receive approval before executing commands.");
-                    }
-                    const execRes = await TerminalHandler.execute(args.command, normalizedPath, args.timeout);
-                    return `EXIT CODE: ${execRes.exitCode}\nSTDOUT:\n${execRes.stdout}\nSTDERR:\n${execRes.stderr}`;
-                default: throw new Error(`Unknown local tool: ${name}`);
-            }
-        };
+        // Dependency Resolution (Waves)
 
         // Dependency Resolution (Waves)
         const waves: OrchestatorTask[][] = [];
@@ -724,38 +749,69 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                                     const argString = toolMatch[2] || "";
 
                                     let args: any = {};
-                                    // Sophisticated parser for key="value" that handles escaped quotes
-                                    const argRegex = /(\w+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|(\d+)|(true|false))/g;
+                                    // Hardened parser for key="value" that detects unparsed trailing fragments (e.g., '+')
+                                    const argRegex = /(\w+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|(\d+(?:\.\d+)?)|(true|false))/g;
                                     let m;
+                                    let lastMatchedIndex = 0;
                                     while ((m = argRegex.exec(argString)) !== null) {
                                         const key = m[1];
                                         let val: any = m[2] !== undefined ? m[2] : (m[3] !== undefined ? m[3] : (m[4] !== undefined ? Number(m[4]) : m[5] === "true"));
 
-                                        // Unescape quotes if it was a string
                                         if (typeof val === 'string') {
-                                            val = val.replace(/\\"/g, '"').replace(/\\'/g, "'").replace(/\\n/g, '\n');
+                                            val = val.replace(/\\"/g, '"').replace(/\\'/g, "'").replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t');
                                         }
                                         args[key] = val;
+                                        lastMatchedIndex = argRegex.lastIndex;
                                     }
 
-                                    try {
-                                        telemetry.sendAgentUpdate({
-                                            id: task.id,
-                                            persona: task.persona,
-                                            status: "executing",
-                                            lastTool: name,
-                                            turnCount: turn,
-                                            startTime: Date.now()
-                                        });
+                                    // Detect unparsed content which usually indicates agents trying to use unsupported expressions like '+'
+                                    const unparsed = argString.substring(lastMatchedIndex).trim().replace(/^[,\s]+|[,\s]+$/g, '');
+                                    if (unparsed && (unparsed.includes('+') || unparsed.includes('(') || unparsed.length > 2)) {
+                                        const errorMsg = `PARSER ERROR: Unparsed fragments found in tool call: "${unparsed}". Expression patterns like '+' or nested calls are NOT supported. Provide a SINGLE literal string/numeric/boolean for each argument. Example: path="./src" (use double quotes).`;
+                                        telemetry.sendLog(`[${task.id}] ${errorMsg}`, "warn");
+                                        messages.push({ role: "user", content: `TOOL_ERROR: ${errorMsg}` });
+                                        logs.push(`Parser Error: ${errorMsg}`);
+                                        // Skip execution of the broken call
+                                    } else {
+                                        try {
+                                            telemetry.sendAgentUpdate({
+                                                id: task.id,
+                                                persona: task.persona,
+                                                status: "executing",
+                                                lastTool: name,
+                                                turnCount: turn,
+                                                startTime: Date.now()
+                                            });
 
-                                        const toolResult = await runTool(name, args);
-                                        telemetry.sendLog(`[${task.id}] Tool ${name} Success`);
-                                        messages.push({ role: "user", content: `TOOL_RESULT: ${toolResult}` });
-                                        logs.push(`Tool ${name} Result: ${toolResult.substring(0, 500)}...`);
-                                    } catch (e: any) {
-                                        telemetry.sendLog(`[${task.id}] Tool ${name} ERROR: ${e.message}`, "error");
-                                        messages.push({ role: "user", content: `TOOL_ERROR: ${e.message}` });
-                                        logs.push(`Tool ${name} Error: ${e.message}`);
+                                            console.error(`[ORCHESTRATOR] ${task.id} calling ${name}`);
+                                            const toolResult = await ToolDispatcher.dispatch(name, args);
+                                            telemetry.sendLog(`[${task.id}] Tool ${name} Result received.`);
+
+                                            // CRITICAL: Protocol Violation Hardening
+                                            if (typeof toolResult === 'string' && toolResult.includes("PROTOCOL VIOLATION")) {
+                                                const violationWarning = `\n\n[CRITICAL INSTRUCTION] You have violated the Actor-Critic protocol. You MUST call 'get_critique' and receive an 'APPROVED' status on the blackboard BEFORE you can successfully call '${name}'. DO NOT attempt to write or modify the filesystem again without approval. Failure to follow this will result in task termination.`;
+                                                messages.push({ role: "user", content: `TOOL_RESULT: ${toolResult}${violationWarning}` });
+                                                
+                                                // Fail-Fast: Check if this was the second violation in a row
+                                                // messages[length-1] is the user message we just pushed
+                                                // messages[length-2] is the current resText
+                                                // messages[length-3] is the PREVIOUS user message (from turn-1)
+                                                const previousUserMsg = messages[messages.length - 3]?.content || "";
+                                                if (previousUserMsg.includes("PROTOCOL VIOLATION")) {
+                                                     const fatalError = "MAX REPEATED PROTOCOL VIOLATIONS EXCEEDED. Task terminated to prevent token-looping and hallucination.";
+                                                     telemetry.sendLog(`[${task.id}] FATAL: ${fatalError}`, "error");
+                                                     messages.push({ role: "user", content: `FATAL ERROR: ${fatalError}` });
+                                                     break; // Terminate agent turn loop
+                                                }
+                                            } else {
+                                                messages.push({ role: "user", content: `TOOL_RESULT: ${toolResult}` });
+                                            }
+                                            logs.push(`Tool ${name} Result: ${toolResult.toString().substring(0, 500)}...`);
+                                        } catch (e: any) {
+                                            telemetry.sendLog(`[${task.id}] Tool ${name} ERROR: ${e.message}`, "error");
+                                            messages.push({ role: "user", content: `TOOL_ERROR: ${e.message}` });
+                                            logs.push(`Tool ${name} Error: ${e.message}`);
+                                        }
                                     }
                                 } else {
                                     break; // Done or no tool called
@@ -784,6 +840,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
                     const currentWaveIndex = waves.indexOf(wave);
                     blackboard.set(`wave_summary_${currentWaveIndex}`, summary);
+                    blackboard.pruneSummaries(3); // Keep only the last 3 waves to prevent context bloat
                     telemetry.sendLog(`[SUMMARIZER] Wave ${currentWaveIndex} results condensed.`);
                 } catch (e: any) {
                     telemetry.sendLog(`[SUMMARIZER] Failed to condense wave: ${e.message}`, "warn");
@@ -796,178 +853,125 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
     }
 
-    if (request.params.name === "get_critique") {
+    const toolResult = await ToolDispatcher.dispatch(request.params.name, request.params.arguments);
+    if (typeof toolResult === "string" && toolResult.includes("PROTOCOL VIOLATION")) {
+        return { content: [{ type: "text", text: toolResult }], isError: true };
+    }
+    return { content: [{ type: "text", text: toolResult }] };
+});
 
-        interface CritiqueArgs {
-            user_request: string;
-            work_done: string;
-            git_diff_output: string;
-            raw_test_logs: string;
-            conversation_history?: Message[];
-        }
+/**
+ * Shared critique logic for Actor-Critic enforcement.
+ */
+async function performCritique(args: CritiqueArgs): Promise<string> {
+    const {
+        user_request,
+        work_done,
+        git_diff_output,
+        raw_test_logs,
+        conversation_history = [],
+    } = args;
 
-        const {
-            user_request,
-            work_done,
-            git_diff_output,
-            raw_test_logs,
-            conversation_history = [],
-        } = request.params.arguments as unknown as CritiqueArgs;
+    // Input Validation
+    if (!user_request || user_request.trim().length < 5) {
+        return "Error: user_request is too short (min 5 chars).";
+    }
+    if (!work_done || work_done.trim().length < 10) {
+        return "Error: work_done is too short (min 10 chars).";
+    }
 
-        // Explicitly enforce Nitro tier, discarding any downstream requested models.
-        const critiqueModel = CONFIG.DEFAULT_MODEL;
-
-        // Input Validation
-        if (!user_request || user_request.trim().length < 10) {
-            return {
-                content: [{ type: "text", text: "Error: user_request must be at least 10 characters long." }],
-                isError: true,
-            };
-        }
-        if (!work_done || work_done.trim().length < 20) {
-            return {
-                content: [{ type: "text", text: "Error: work_done must be at least 20 characters long." }],
-                isError: true,
-            };
-        }
-        // Strict Regex Validation for legitimate Git diff structures to completely eliminate spoofed hallucinatory payloads
+    // Adaptive Validation: Relax Git Diff requirements for non-code tasks
+    const isNonCode = ["none", "n/a", "no changes", "documentation only"].includes(git_diff_output.toLowerCase().trim());
+    if (!isNonCode) {
         const hasValidHunkHeader = /@@ -\d+(,\d+)? \+\d+(,\d+)? @@/.test(git_diff_output);
         const hasValidGitHeader = /^diff --git a\/.* b\/.*/m.test(git_diff_output);
         const hasValidIndexHeader = /^index [0-9a-f]+\.\.[0-9a-f]+/m.test(git_diff_output);
 
         if (!git_diff_output || (!hasValidHunkHeader && !hasValidGitHeader && !hasValidIndexHeader)) {
-            return {
-                content: [{ type: "text", text: "Error: git_diff_output must strictly contain valid structural regex markers (e.g., '@@ -x,y +x,y @@' or 'diff --git a/b/'). Human visual output explicitly prevented via machine-readable headless JSON-RPC mapping." }],
-                isError: true,
-            };
+            return "Error: git_diff_output must strictly contain valid structural regex markers (e.g., '@@ -x,y +x,y @@') or be explicitly marked as 'N/A' for non-code tasks.";
         }
-        if (!raw_test_logs || raw_test_logs.trim().length <= 4) {
-            return {
-                content: [{ type: "text", text: "Error: raw_test_logs is strictly required. The string must contain at least 5 characters of raw terminal test logs." }],
-                isError: true,
-            };
+    }
+
+    if (!raw_test_logs || raw_test_logs.trim().length < 2) {
+        return "Error: raw_test_logs is required. Use 'N/A' if no tests were run.";
+    }
+
+    // Pre-Filters
+    const lazyKeywords = ["REDACTED_T_O_D_O", "REDACTED_F_I_X_M_E", "(dots)"];
+    const textToScan = [work_done, git_diff_output, raw_test_logs].join(" ");
+    for (const keyword of lazyKeywords) {
+        if (textToScan.includes(keyword)) {
+            return `[STATUS]\nREJECTED\n\n[VIOLATIONS]\n4\n\n[CRITIQUE]\nZero-cost pre-filter triggered. forbidden marker: "${keyword}".`;
         }
+    }
 
-        // Zero-Cost Deterministic Pre-Filters
-        const lazyKeywords = ["REDACTED_T_O_D_O", "REDACTED_F_I_X_M_E", "(dots)"];
-        const textToScan = [work_done, git_diff_output, raw_test_logs].join(" ");
+    const systemPrompt = `Role & Purpose:
+You are the Critic Node in a strict Actor-Critic autonomous agent architecture. Your sole purpose is to audit, verify, and either approve or reject the work submitted by the Actor agent.
 
-        for (const keyword of lazyKeywords) {
-            if (textToScan.includes(keyword)) {
-                const preFilterRejection = `[STATUS]\nREJECTED\n\n[VIOLATIONS]\n4\n\n[CRITIQUE]\nZero-cost pre-filter triggered. The submission contains a forbidden quality marker: "${keyword}".`;
-                return {
-                    content: [{ type: "text", text: preFilterRejection }],
-                };
-            }
-        }
-
-        const systemPrompt = `Role & Purpose:
-You are the Critic Node in a strict Actor-Critic autonomous agent architecture. You do not write new features, and you do not execute primary tasks. Your sole purpose is to audit, verify, and either approve or reject the work submitted by the Actor agent. You are the final quality control gate.
-
-Operating Stance:
-You must be ruthless, analytical, and strictly bound by the rules. You do not give the Actor the benefit of the doubt. If a submission violates even a single constraint, or if the logic is flawed, you must reject it. "Plausible deniability," assumptions, and unverified code are critical failures.
-
-Evaluation Criteria (The Audit Checklist):
-Whenever the Actor submits code, system designs, or test outputs, you must evaluate them against these exact parameters:
-
-1. The "Read Before Write" Check: Did the Actor prove that they investigated the existing codebase before writing this solution? Reject if the code duplicates existing functionality.
-2. The API Verification Check: Does the code rely on third-party APIs or external libraries? If yes, did the Actor provide proof (via documentation fetches or isolated test scripts) that the API contract is correct? Reject any assumed or "guessed" endpoints.
-3. The High-Visibility Check: Does the proposed solution rely on a GUI or require human visual intervention? Reject it. The solution must be 100% headless, CLI-driven, or API-based with robust logging.
-4. The Production-Ready Check: Scan the submitted code for placeholders, unfinished labels, abbreviated logic, or incomplete error handling. Reject if any are found.
-5. The Proof of Work Check: Did the Actor submit a passing test output alongside their code? Does the test actually validate the specific logic they just wrote, or is it a superficial test? Reject if the test fails, is missing, or does not adequately cover the new logic.
-6. The "Cold-Start" Proof Check: Did the Actor submit raw terminal output (stdout/stderr) proving they executed the script end-to-end exactly as a human user would? Reject the work immediately if the Actor only ran unit tests, used mocked data, or failed to provide raw execution logs. The code must survive contact with the real environment.
-7. The "Value-Add" Quality Check: Did the Actor do the bare minimum? Review the code for anticipatory engineering. If the Actor did not include robust error handling, graceful fail states, input validation, or helpful logging in addition to the core requested feature, you must reject it. Punish lazy, bare-minimum coding.
+Evaluation Criteria (Strict for Code, Adaptive for Documentation):
+1. Read Before Write Check.
+2. API Verification Check.
+3. High-Visibility Check (Headless only).
+4. Production-Ready Check (No placeholders).
+5. Proof of Work Check (Proportional to task complexity).
+6. Cold-Start Proof Check (Raw terminal logs required for code/execution).
+7. Value-Add Quality Check (No bare minimum).
 
 Output Protocol:
-You must format your response strictly using the following structure. Do not use conversational filler.
+<thinking>...</thinking>
+[STATUS] (APPROVED or REJECTED)
+[VIOLATIONS] (Criteria #s or None)
+[CRITIQUE] (Why it failed, or key strengths)
+[REQUIRED ACTION] (What to fix, or 'None' for approved progress)`;
 
-<thinking>
-[Step-by-step evaluation of each of the 7 criteria against the submission]
-</thinking>
-
-[STATUS]
-Output exactly either "APPROVED" or "REJECTED".
-
-[VIOLATIONS]
-If REJECTED, list the exact Evaluation Criteria number(s) that failed.
-If APPROVED, output "None."
-
-[CRITIQUE]
-Provide a concise, blunt explanation of exactly what failed and why. Point to specific lines of code or specific logical leaps.
-
-[REQUIRED ACTION]
-Tell the Actor exactly what they must do to fix the failure before resubmitting. Do not write the code for them; tell them the logical or procedural steps they missed.`;
-
-        const prompt = `
-User Original Request:
-${user_request}
-
-Work Done by Agent:
-${work_done}
-
-Git Diff Output (Evidence):
-${git_diff_output || "Not provided."}
-
-Raw Test Logs (Evidence):
-${raw_test_logs || "Not provided."}
-
-Please provide your critique based on the above information.
+    const prompt = `
+User Original Request: ${user_request}
+Work Done: ${work_done}
+Git Diff: ${git_diff_output}
+Raw Test Logs: ${raw_test_logs}
 `;
 
-        const messages: Message[] = [
-            { role: "system", content: systemPrompt }
-        ];
-        for (const msg of conversation_history) {
-            messages.push(msg);
+    const messages: Message[] = [{ role: "system", content: systemPrompt }];
+    for (const msg of conversation_history) messages.push(msg);
+    messages.push({ role: "user", content: prompt });
+
+    try {
+        const critique = await callOpenRouterApi(messages, CONFIG.DEFAULT_MODEL);
+        if (critique.includes("[STATUS]") && critique.includes("APPROVED")) {
+            blackboard.approveCritique();
+            telemetry.sendLog("[CRITIC] Approval registered.");
+        } else {
+            blackboard.rejectCritique();
+            telemetry.sendLog("[CRITIC] Work REJECTED.", "warn");
         }
-        messages.push({ role: "user", content: prompt });
-
-        try {
-            const critique = await callOpenRouterApi(messages, CONFIG.DEFAULT_MODEL);
-
-            // Enforcement Layer: Scan for [STATUS] APPROVED
-            if (critique.includes("[STATUS]") && critique.includes("APPROVED")) {
-                // Use internal state setter to bypass sub-agent forgery protection
-                (blackboard as any).state["_sys_critique_status"] = "APPROVED";
-                telemetry.sendLog("[CRITIC] Approval registered in system state.");
-            } else {
-                (blackboard as any).state["_sys_critique_status"] = "REJECTED";
-                telemetry.sendLog("[CRITIC] Work REJECTED. Sensitive tools locked.", "warn");
-            }
-
-            return {
-                content: [{ type: "text", text: critique }],
-            };
-        } catch (error: any) {
-            return {
-                content: [{ type: "text", text: `Error: ${error.message}` }],
-                isError: true,
-            };
-        }
+        return critique;
+    } catch (error: any) {
+        return `Error calling critic: ${error.message}`;
     }
+}
 
-    throw new Error(`Unknown tool: ${request.params.name}`);
-});
-
-async function main() {
+async function runServer() {
     const transport = new StdioServerTransport();
-
-    // Auto-launch Swarm Monitor Dashboard
-    if (process.env.MACO_MONITOR !== "false") {
-        console.error("[MONITOR] Launching Swarm Dashboard...");
-        const monitorPath = path.join(__dirname, "monitor.js");
-        // Use 'start cmd /c' for maximum compatibility on Windows if wt is not installed
-        spawn("cmd", ["/c", "start", "node", monitorPath], {
-            detached: true,
-            stdio: "ignore",
-            shell: true
-        }).unref();
-
-        telemetry.sendLog("MACO Swarm Monitor initialized");
-    }
-
     await server.connect(transport);
     console.error("Critic MCP Server running on stdio (Filtered)");
+
+    // Auto-launch Monitor in a separate window (Windows-specific optimization)
+    if (process.platform === "win32" && process.env.MACO_MONITOR !== "false") {
+        const monitorPath = path.join(__dirname, "..", "start_monitor.bat");
+        console.error(`[CRITIC-INIT] Spawning monitor: ${monitorPath}`);
+        // Use 'start cmd /k' to ensure the window stays open for visibility
+        spawn("cmd.exe", ["/c", "start", "cmd.exe", "/k", monitorPath], {
+            detached: true,
+            stdio: "ignore",
+            cwd: path.join(__dirname, "..")
+        }).unref();
+        
+        telemetry.sendLog("MACO Swarm Monitor auto-launched");
+    }
+}
+
+async function main() {
+    await runServer();
 }
 
 main().catch((error) => {
