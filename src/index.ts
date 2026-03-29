@@ -61,10 +61,10 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 const CONFIG = {
-    DEFAULT_MODEL: process.env.CRITIC_DEFAULT_MODEL || "minimax/minimax-m2.7",
-    HEAVY_REASONING_MODEL: process.env.CRITIC_HEAVY_MODEL || "google/gemini-3.1-pro-preview-09-2025",
-    FALLBACK_MODEL: process.env.CRITIC_FALLBACK_MODEL || "google/gemini-2.5-flash-lite-preview-09-2025",
-    OPENROUTER_FALLBACK: process.env.CRITIC_OR_FALLBACK || "google/gemini-2.0-flash-001",
+    DEFAULT_MODEL: process.env.CRITIC_DEFAULT_MODEL || "gemini-1.5-flash-latest",
+    HEAVY_REASONING_MODEL: process.env.CRITIC_HEAVY_MODEL || "gemini-1.5-pro-latest",
+    FALLBACK_MODEL: process.env.CRITIC_FALLBACK_MODEL || "gemini-1.5-flash-latest",
+    OPENROUTER_FALLBACK: process.env.CRITIC_OR_FALLBACK || "google/gemini-1.5-flash-latest",
     VERSION: "2.3.1",
     TIMEOUT_AGENT_TURN_MS: Number(process.env.TIMEOUT_AGENT_TURN_MS) || 120000,
     TIMEOUT_TOTAL_TASK_MS: Number(process.env.TIMEOUT_TOTAL_TASK_MS) || 600000
@@ -417,7 +417,7 @@ async function callGeminiApi(messages: Message[], model: string = CONFIG.FALLBAC
         };
 
         const response = await axios.post(
-            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_API_KEY}`,
             payload,
             buildRequestConfig({
                 headers: { "Content-Type": "application/json" },
@@ -686,11 +686,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { tasks, optimization_rounds = 0, concurrency = 3 } = request.params.arguments as unknown as ParallelOrchestratorArgs;
 
         const results: Record<string, { output: string; persona: string; logs: string[] }> = {};
+        const bbState = JSON.stringify(blackboard.getAll());
 
         // Helper to resolve persona
         const resolvePersona = (p: string) => {
             const base = personaTemplates[p] || p;
-            const bbState = JSON.stringify(blackboard.getAll());
             return `${base}\n\nTOOL_USE_PROTOCOL: You can interact with the local filesystem and the shared Blackboard. You MUST use the following format for tool calls:\nCALL: tool_name(arg1="val1", arg2="val2")\n\nBLACKBOARD STATE: ${bbState}\n\nRULES:\n1. Only use ONE 'CALL:' per message.\n2. Always wait for the TOOL_RESULT before making your next call.\n3. Wrap all string arguments in double quotes.\n4. When using 'bb_set', describe the discovery so other agents know what happened.\n\nAVAILABLE TOOLS:\n- fs_list(path="...")\n- fs_read(path="...")\n- fs_write(path="...", content="...", [append=true])\n- fs_mkdir(path="...")\n- fs_delete(path="...")\n- fs_search(path="...", pattern="...")
 - fs_grep(path="...", pattern="...")
 - fs_execute(command="...", path="...", [timeout=30000])
@@ -865,6 +865,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                                 turn++;
                             }
                             results[task.id] = { output: messages[messages.length - 1].content, persona: task.persona, logs };
+                            telemetry.sendAgentStop(task.id);
                         })(),
                         CONFIG.TIMEOUT_TOTAL_TASK_MS,
                         `Global Task execution for agent ${task.id}`
@@ -927,13 +928,16 @@ async function performCritique(args: CritiqueArgs): Promise<string> {
     }
 
     // Adaptive Validation: Relax Git Diff requirements for non-code tasks
+    if (!git_diff_output) {
+        return "Error: git_diff_output is required. Use 'N/A' if no changes were made.";
+    }
     const isNonCode = ["none", "n/a", "no changes", "documentation only"].includes(git_diff_output.toLowerCase().trim());
     if (!isNonCode) {
         const hasValidHunkHeader = /@@ -\d+(,\d+)? \+\d+(,\d+)? @@/.test(git_diff_output);
         const hasValidGitHeader = /^diff --git a\/.* b\/.*/m.test(git_diff_output);
         const hasValidIndexHeader = /^index [0-9a-f]+\.\.[0-9a-f]+/m.test(git_diff_output);
 
-        if (!git_diff_output || (!hasValidHunkHeader && !hasValidGitHeader && !hasValidIndexHeader)) {
+        if (!hasValidHunkHeader && !hasValidGitHeader && !hasValidIndexHeader) {
             return "Error: git_diff_output must strictly contain valid structural regex markers (e.g., '@@ -x,y +x,y @@') or be explicitly marked as 'N/A' for non-code tasks.";
         }
     }

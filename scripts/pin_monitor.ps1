@@ -19,18 +19,25 @@ try {
     # SWP_NOSIZE = 1, SWP_NOMOVE = 2
     $flags = 0x0001 -bor 0x0002
 
-    $process = Get-Process | Where-Object { $_.MainWindowTitle -eq $Title } | Select-Object -First 1
+    $maxRetries = 5
+    $retryDelay = 1.0 # seconds
+    $process = $null
 
-    if ($process) {
+    for ($i = 0; $i -lt $maxRetries; $i++) {
+        $process = Get-Process | Where-Object { $_.MainWindowTitle -eq $Title } | Select-Object -First 1
+        if ($process -and $process.MainWindowHandle -ne [IntPtr]::Zero) {
+            break
+        }
+        Write-Host "[SYSTEM] Window not ready yet, retrying... ($($i+1)/$maxRetries)"
+        Start-Sleep -Seconds $retryDelay
+    }
+
+    if ($process -and $process.MainWindowHandle -ne [IntPtr]::Zero) {
         Write-Host "[SYSTEM] Found window. Pinning to Top..."
         $hwnd = $process.MainWindowHandle
-        if ($hwnd -ne [IntPtr]::Zero) {
-            [Win32.Win32Functions]::SetWindowPos($hwnd, [IntPtr](-1), 0, 0, 0, 0, $flags)
-        } else {
-            Write-Host "[WARNING] Window handle not found."
-        }
+        [Win32.Win32Functions]::SetWindowPos($hwnd, [IntPtr](-1), 0, 0, 0, 0, $flags)
     } else {
-        Write-Host "[WARNING] Could not find window with title: $Title."
+        Write-Host "[WARNING] Could not find or access window with title: $Title."
     }
 } catch {
     Write-Host "[ERROR] Window pinning logic failed: $_"

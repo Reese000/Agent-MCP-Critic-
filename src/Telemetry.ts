@@ -19,7 +19,7 @@ export interface AgentState {
 }
 
 export interface SwarmUpdate {
-    type: "agent_update" | "blackboard_update" | "log_append" | "heartbeat" | "streaming_update";
+    type: "agent_update" | "blackboard_update" | "log_append" | "heartbeat" | "streaming_update" | "agent_stop";
     data: any;
 }
 
@@ -73,28 +73,64 @@ class TelemetryBroadcaster {
         }
     }
 
+    private clientQueues = new WeakMap<net.Socket, string[]>();
+
     broadcast(update: SwarmUpdate) {
         const payload = JSON.stringify(update) + "\n";
         this.clients = this.clients.filter(client => {
             if (client.writable && !client.destroyed) {
                 try {
-                    const success = client.write(payload);
-                    if (!success) {
-                        // Buffer full, wait for drain or destroy if it hangs too long
-                        // For now we just return true and hope it drains
+                    const queue = this.clientQueues.get(client);
+                    if (queue) {
+                        queue.push(payload);
+                    } else {
+                        const success = client.write(payload);
+                        if (!success) {
+                            this.clientQueues.set(client, [payload]);
+                            client.once('drain', () => this._handleDrain(client));
+                        }
                     }
                     return true;
                 } catch (e) {
                     client.destroy();
+                    this.clientQueues.delete(client);
                     return false;
                 }
             }
+            this.clientQueues.delete(client);
             return false;
         });
     }
 
+    private _handleDrain(client: net.Socket) {
+        const queue = this.clientQueues.get(client);
+        if (!queue) {
+            return;
+        }
+
+        while (queue.length > 0) {
+            const payload = queue[0];
+            const success = client.write(payload);
+
+            if (success) {
+                queue.shift();
+            } else {
+                client.once('drain', () => this._handleDrain(client));
+                return;
+            }
+        }
+
+        if (queue.length === 0) {
+            this.clientQueues.delete(client);
+        }
+    }
+
     sendAgentUpdate(agent: AgentState) {
         this.broadcast({ type: "agent_update", data: agent });
+    }
+
+    sendAgentStop(agentId: string) {
+        this.broadcast({ type: "agent_stop", data: { id: agentId, timestamp: Date.now() } });
     }
 
     sendBlackboardUpdate(key: string, value: string) {
